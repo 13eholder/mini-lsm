@@ -24,11 +24,13 @@ use crate::table::SsTable;
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
 /// Represents the state of the storage engine.
+/// 持有MemTable和SST,负责实际的存储和压缩过程
 #[derive(Clone)]
 pub struct LsmStorageState {
     /// The current memtable.
     pub memtable: Arc<MemTable>,
     /// Immutable memtables, from latest to earliest.
+    /// 最新的在开头,最老的在结尾
     pub imm_memtables: Vec<Arc<MemTable>>,
     /// L0 SSTs, from latest to earliest.
     pub l0_sstables: Vec<usize>,
@@ -119,6 +121,7 @@ pub enum CompactionFilter {
 }
 
 /// The storage interface of the LSM tree.
+/// 相当于LevelDB里面的DBImpl,实现了单机存储引擎
 pub(crate) struct LsmStorageInner {
     pub(crate) state: Arc<RwLock<Arc<LsmStorageState>>>,
     pub(crate) state_lock: Mutex<()>,
@@ -133,6 +136,7 @@ pub(crate) struct LsmStorageInner {
 }
 
 /// A thin wrapper for `LsmStorageInner` and the user interface for MiniLSM.
+/// 在单机存储引擎基础上添加多线程功能
 pub struct MiniLsm {
     pub(crate) inner: Arc<LsmStorageInner>,
     /// Notifies the L0 flush thread to stop working. (In week 1 day 6)
@@ -279,7 +283,15 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        Ok(self.state.read().memtable.get(key))
+        let state = self.state.read();
+        let mut v = state.memtable.get(key);
+        if v.is_none() && !state.imm_memtables.is_empty() {
+            v = state.imm_memtables.iter().find_map(|mt| mt.get(key));
+        }
+        match v {
+            Some(value) if !value.is_empty() => Ok(Some(value)),
+            _ => Ok(None),
+        }
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -289,11 +301,17 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
+            let _ = self.force_freeze_memtable(&self.state_lock.lock());
+        }
         self.state.read().memtable.put(key, value)
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
+        if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
+            let _ = self.force_freeze_memtable(&self.state_lock.lock());
+        }
         self.state.read().memtable.put(key, Default::default())
     }
 
@@ -319,7 +337,14 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let memtable = Arc::new(MemTable::create(self.next_sst_id()));
+        let mut state = self.state.write();
+        let mut snapshot = state.as_ref().clone();
+        let old_memtable = std::mem::replace(&mut snapshot.memtable, memtable.clone());
+        old_memtable.sync_wal()?;
+        snapshot.imm_memtables.insert(0, old_memtable);
+        *state = Arc::new(snapshot);
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk

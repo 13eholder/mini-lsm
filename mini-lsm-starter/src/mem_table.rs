@@ -74,10 +74,11 @@ impl MemTable {
     }
 
     /// Get a value by key.
+    /// 直接返回Get的结果,在这一级不做区分,否则无法分辨Key是否存在
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
         self.map
             .get(key)
-            .and_then(|entry| Some(Bytes::copy_from_slice(entry.value())))
+            .map(|entry| Bytes::copy_from_slice(entry.value()))
     }
 
     /// Put a key-value pair into the mem-table.
@@ -86,13 +87,10 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        // unimplemented!()
-        if value.is_empty() {
-            self.map.remove(key);
-        } else {
-            self.map
-                .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
-        }
+        self.map
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.approximate_size
+            .fetch_add(key.len() + value.len(), std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
