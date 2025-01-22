@@ -1,12 +1,11 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod builder;
 mod iterator;
 
 pub use builder::BlockBuilder;
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::BlockIterator;
+
+pub(crate) const U16_SIZE: usize = size_of::<u16>();
 
 /// A block is the smallest unit of read and caching in LSM tree. It is a collection of sorted key-value pairs.
 pub struct Block {
@@ -18,11 +17,29 @@ impl Block {
     /// Encode the internal data to the data layout illustrated in the tutorial
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        // unimplemented!()
+        let num_entries = self.offsets.len();
+        let mut buffer = self.data.clone();
+        for offset in &self.offsets {
+            buffer.put_u16(*offset);
+        }
+        buffer.put_u16(num_entries as u16);
+        buffer.into()
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        let num_entries = (&data[data.len() - U16_SIZE..]).get_u16() as usize;
+        let data_end = data.len() - U16_SIZE - U16_SIZE * num_entries;
+        let offsets = &data[data_end..data.len() - U16_SIZE];
+        let data = &data[..data_end];
+        Self {
+            data: Vec::from(data),
+            offsets: offsets.chunks(U16_SIZE).map(|mut x| x.get_u16()).collect(),
+        }
+    }
+    /// num_entries
+    pub(crate) fn num_entries(&self) -> usize {
+        self.offsets.len()
     }
 }
