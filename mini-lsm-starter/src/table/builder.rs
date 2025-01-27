@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -50,7 +47,7 @@ impl SsTableBuilder {
                 last_key,
             });
             self.data.extend(block.encode());
-            assert_eq!(self.builder.add(key, value), true);
+            assert!(self.builder.add(key, value));
         }
     }
 
@@ -100,8 +97,4 @@ impl SsTableBuilder {
     pub(crate) fn build_for_test(self, path: impl AsRef<Path>) -> Result<SsTable> {
         self.build(0, None, path)
     }
-
-    // fn meta_size(&self) -> usize {
-    //     self.meta.iter().map(|meta| meta.encode_size()).sum()
-    // }
 }

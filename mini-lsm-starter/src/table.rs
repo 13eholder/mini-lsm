@@ -9,7 +9,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
@@ -35,11 +35,7 @@ impl BlockMeta {
     /// Encode block meta to a buffer.
     /// You may add extra fields to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.
-    pub fn encode_block_meta(
-        block_meta: &[BlockMeta],
-        #[allow(clippy::ptr_arg)] // remove this allow after you finish
-        buf: &mut Vec<u8>,
-    ) {
+    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
         // unimplemented!()
         for meta in block_meta {
             buf.put_u64(meta.offset as u64);
@@ -186,7 +182,19 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if block_idx >= self.block_meta.len() {
+            bail!("BlockIdx out of range");
+        }
+        let block_begin = self.block_meta[block_idx].offset;
+        let block_end = if block_idx + 1 < self.block_meta.len() {
+            self.block_meta[block_idx + 1].offset
+        } else {
+            self.block_meta_offset
+        };
+        let data = self
+            .file
+            .read(block_begin as u64, (block_end - block_begin) as u64)?;
+        Ok(Arc::new(Block::decode(data.as_slice())))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
@@ -198,7 +206,20 @@ impl SsTable {
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        // unimplemented!()
+        let (mut left, mut right) = (0usize, self.block_meta.len());
+        while left < right {
+            let mid = (left + right) / 2;
+            if self.block_meta[mid].last_key.as_key_slice() < key {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        if right == self.num_of_blocks() {
+            right -= 1;
+        }
+        right
     }
 
     /// Get number of data blocks.
