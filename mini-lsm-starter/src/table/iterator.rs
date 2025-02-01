@@ -22,7 +22,7 @@ impl SsTableIterator {
     pub fn create_and_seek_to_first(table: Arc<SsTable>) -> Result<Self> {
         // unimplemented!()
         let blk_idx = 0;
-        let blk_iter = BlockIterator::create_and_seek_to_first(table.read_block(blk_idx)?);
+        let blk_iter = BlockIterator::create_and_seek_to_first(table.read_block_cached(blk_idx)?);
         Ok(Self {
             table,
             blk_iter,
@@ -37,8 +37,9 @@ impl SsTableIterator {
             self.blk_iter.seek_to_first();
         } else {
             self.blk_idx = 0;
-            self.blk_iter =
-                BlockIterator::create_and_seek_to_first(self.table.read_block(self.blk_idx)?);
+            self.blk_iter = BlockIterator::create_and_seek_to_first(
+                self.table.read_block_cached(self.blk_idx)?,
+            );
         }
         Ok(())
     }
@@ -50,7 +51,8 @@ impl SsTableIterator {
         if blk_idx == table.block_meta.len() {
             bail!("No such key in sst");
         }
-        let blk_iter = BlockIterator::create_and_seek_to_key(table.read_block(blk_idx)?, key);
+        let blk_iter =
+            BlockIterator::create_and_seek_to_key(table.read_block_cached(blk_idx)?, key);
         Ok(Self {
             table,
             blk_iter,
@@ -75,7 +77,7 @@ impl SsTableIterator {
         } else {
             self.blk_idx = blk_idx;
             self.blk_iter =
-                BlockIterator::create_and_seek_to_key(self.table.read_block(blk_idx)?, key);
+                BlockIterator::create_and_seek_to_key(self.table.read_block_cached(blk_idx)?, key);
         }
 
         Ok(())
@@ -110,8 +112,9 @@ impl StorageIterator for SsTableIterator {
         self.blk_iter.next();
         if !self.blk_iter.is_valid() && self.blk_idx + 1 < self.table.num_of_blocks() {
             self.blk_idx += 1;
-            self.blk_iter =
-                BlockIterator::create_and_seek_to_first(self.table.read_block(self.blk_idx)?);
+            self.blk_iter = BlockIterator::create_and_seek_to_first(
+                self.table.read_block_cached(self.blk_idx)?,
+            );
         }
         Ok(())
     }
