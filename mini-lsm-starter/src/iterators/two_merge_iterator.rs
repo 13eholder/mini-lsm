@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use anyhow::Result;
 
 use super::StorageIterator;
@@ -11,6 +8,7 @@ pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
     // Add fields as need
+    usea: bool,
 }
 
 impl<
@@ -19,7 +17,14 @@ impl<
     > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let usea = if a.is_valid() && b.is_valid() {
+            a.key() <= b.key()
+        } else if a.is_valid() {
+            true
+        } else {
+            false
+        };
+        Ok(Self { a, b, usea })
     }
 }
 
@@ -31,18 +36,43 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.usea {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.usea {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.a.is_valid() || self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.usea {
+            while self.b.is_valid() && self.b.key() <= self.a.key() {
+                let _ = self.b.next();
+            }
+            self.a.next()?;
+        } else {
+            self.b.next()?;
+        }
+
+        self.usea = if self.a.is_valid() && self.b.is_valid() {
+            self.a.key() <= self.b.key()
+        } else if self.a.is_valid() {
+            true
+        } else {
+            false
+        };
+
+        Ok(())
     }
 }
