@@ -16,11 +16,14 @@ use crate::compact::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
+use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{map_bound, MemTable};
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -289,10 +292,29 @@ impl LsmStorageInner {
         if v.is_none() && !state.imm_memtables.is_empty() {
             v = state.imm_memtables.iter().find_map(|mt| mt.get(key));
         }
-        match v {
-            Some(value) if !value.is_empty() => Ok(Some(value)),
-            _ => Ok(None),
+        if let Some(value) = v {
+            if !value.is_empty() {
+                return Ok(Some(value));
+            } else {
+                return Ok(None);
+            }
         }
+        for sst in state
+            .l0_sstables
+            .iter()
+            .map(|sst_id| state.sstables[sst_id].clone())
+            .filter(|sst| sst.first_key().raw_ref() <= key && key <= sst.last_key().raw_ref())
+        {
+            let iter =
+                SsTableIterator::create_and_seek_to_key(sst.clone(), KeySlice::from_slice(key))?;
+            if iter.is_valid() && iter.key().raw_ref() == key {
+                if iter.value().is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(Bytes::copy_from_slice(iter.value())));
+            }
+        }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -365,16 +387,63 @@ impl LsmStorageInner {
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
         let state = self.state.read();
-        let mut iters = Vec::with_capacity(state.imm_memtables.len() + 1);
-        iters.push(Box::new(state.memtable.scan(lower, upper)));
-        iters.extend(
+        let mut miters = Vec::with_capacity(state.imm_memtables.len() + 1);
+        miters.push(Box::new(state.memtable.scan(lower, upper)));
+        miters.extend(
             state
                 .imm_memtables
                 .iter()
                 .map(|imm| Box::new(imm.scan(lower, upper))),
         );
+        let miter = MergeIterator::create(miters);
+        let mut siters = Vec::with_capacity(state.sstables.len());
+        for sst in state
+            .l0_sstables
+            .iter()
+            .map(|sst_id| state.sstables[sst_id].clone())
+            .filter(|sst| key_overlap(lower, upper, sst.first_key(), sst.last_key()))
+        {
+            let iter = match lower {
+                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sst.clone())?,
+                Bound::Excluded(k) => {
+                    let mut iter = SsTableIterator::create_and_seek_to_key(
+                        sst.clone(),
+                        KeySlice::from_slice(k),
+                    )?;
+                    if iter.is_valid() && iter.key().raw_ref() == k {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Included(k) => {
+                    SsTableIterator::create_and_seek_to_key(sst.clone(), KeySlice::from_slice(k))?
+                }
+            };
+            siters.push(Box::new(iter));
+        }
+        let siter = MergeIterator::create(siters);
         Ok(FusedIterator::new(LsmIterator::new(
-            MergeIterator::create(iters),
+            TwoMergeIterator::create(miter, siter)?,
+            map_bound(upper),
         )?))
     }
+}
+
+fn key_overlap(
+    lower: Bound<&[u8]>,
+    upper: Bound<&[u8]>,
+    first_key: &KeyBytes,
+    last_key: &KeyBytes,
+) -> bool {
+    match lower {
+        Bound::Excluded(k) if last_key.raw_ref() <= k => return false,
+        Bound::Included(k) if last_key.raw_ref() < k => return false,
+        _ => {}
+    };
+    match upper {
+        Bound::Excluded(k) if first_key.raw_ref() >= k => return false,
+        Bound::Included(k) if first_key.raw_ref() > k => return false,
+        _ => {}
+    };
+    true
 }

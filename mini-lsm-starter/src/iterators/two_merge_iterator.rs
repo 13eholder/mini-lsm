@@ -19,10 +19,8 @@ impl<
     pub fn create(a: A, b: B) -> Result<Self> {
         let usea = if a.is_valid() && b.is_valid() {
             a.key() <= b.key()
-        } else if a.is_valid() {
-            true
         } else {
-            false
+            a.is_valid()
         };
         Ok(Self { a, b, usea })
     }
@@ -58,7 +56,7 @@ impl<
     fn next(&mut self) -> Result<()> {
         if self.usea {
             while self.b.is_valid() && self.b.key() <= self.a.key() {
-                let _ = self.b.next();
+                self.b.next()?;
             }
             self.a.next()?;
         } else {
@@ -67,10 +65,8 @@ impl<
 
         self.usea = if self.a.is_valid() && self.b.is_valid() {
             self.a.key() <= self.b.key()
-        } else if self.a.is_valid() {
-            true
         } else {
-            false
+            self.a.is_valid()
         };
 
         Ok(())
