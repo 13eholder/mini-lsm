@@ -183,7 +183,11 @@ impl SsTable {
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
         if block_idx >= self.block_meta.len() {
-            bail!("BlockIdx out of range");
+            bail!(
+                "block idx {} out of range [0,{})",
+                block_idx,
+                self.block_meta.len()
+            );
         }
         let block_begin = self.block_meta[block_idx].offset;
         let block_end = if block_idx + 1 < self.block_meta.len() {
