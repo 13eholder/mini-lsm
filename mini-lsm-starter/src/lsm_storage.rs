@@ -307,7 +307,13 @@ impl LsmStorageInner {
             .l0_sstables
             .iter()
             .map(|sst_id| state.sstables[sst_id].clone())
-            .filter(|sst| sst.first_key().raw_ref() <= key && key <= sst.last_key().raw_ref())
+            .filter(|sst| {
+                if let Some(ref filter) = sst.bloom {
+                    filter.may_contain(farmhash::fingerprint32(key))
+                } else {
+                    sst.first_key().raw_ref() <= key && key <= sst.last_key().raw_ref()
+                }
+            })
         {
             let iter =
                 SsTableIterator::create_and_seek_to_key(sst.clone(), KeySlice::from_slice(key))?;

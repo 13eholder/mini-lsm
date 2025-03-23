@@ -25,12 +25,13 @@ pub struct BlockIterator {
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
+        let (first_key, _) = block.key_range();
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
+            first_key: KeyVec::from_vec(first_key.raw_ref().to_vec()),
         }
     }
 
@@ -85,13 +86,15 @@ impl BlockIterator {
     fn decode(&self, idx: usize) -> (KeyVec, (usize, usize)) {
         let offset = self.block.offsets[idx] as usize;
         let mut data = &self.block.data[offset..];
-        let key_len = data.get_u16() as usize;
+        let overlap_key_len = data.get_u16() as usize;
+        let rest_key_len = data.get_u16() as usize;
         let mut key = KeyVec::new();
-        key.append(&data[..key_len]);
-        data.advance(key_len);
+        key.append(&(self.first_key.raw_ref()[..overlap_key_len]));
+        key.append(&data[..rest_key_len]);
+        data.advance(rest_key_len);
         let value_len = data.get_u16() as usize;
-        /* data_begin + key_len(u16) + len(key) + value_len(u16) */
-        let value_begin = offset + U16_SIZE + key_len + U16_SIZE;
+        /* data_begin + overlap_key_len(u16) + rest_key_len(u16) + rest_len(key) + value_len(u16) */
+        let value_begin = offset + U16_SIZE * 2 + rest_key_len + U16_SIZE;
         let value_range = (value_begin, value_begin + value_len);
         (key, value_range)
     }
@@ -101,11 +104,11 @@ impl BlockIterator {
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
         // unimplemented!()
-        // let mut left=0, right= self.block.num_entries();
         let (mut left, mut right) = (0, self.block.num_entries());
 
         while left < right {
             let mid = (left + right) / 2;
+            println!("seek to idx {}", mid);
             let (cur_key, _) = self.decode(mid);
             if cur_key.as_key_slice() < key {
                 left = mid + 1;

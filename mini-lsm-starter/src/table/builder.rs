@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bytes::BufMut;
 
-use super::{BlockMeta, FileObject, SsTable};
+use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 
 /// Builds an SSTable from key-value pairs.
@@ -15,12 +15,12 @@ pub struct SsTableBuilder {
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    key_hashes: Vec<u32>,
 }
 
 impl SsTableBuilder {
     /// Create a builder based on target block size.
     pub fn new(block_size: usize) -> Self {
-        // unimplemented!()
         Self {
             builder: BlockBuilder::new(block_size),
             first_key: Vec::new(),
@@ -28,6 +28,7 @@ impl SsTableBuilder {
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
+            key_hashes: Vec::new(),
         }
     }
 
@@ -36,7 +37,7 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        // unimplemented!()
+        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
         if !self.builder.add(key, value) {
             let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
             let block = builder.build();
@@ -88,7 +89,13 @@ impl SsTableBuilder {
         let block_meta_offset = data.len();
         data.extend(meta_data);
         data.put_u32(block_meta_offset as u32);
-
+        // bloom filter
+        let bits_per_key = Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01);
+        let bloom = Bloom::build_from_key_hashes(&self.key_hashes, bits_per_key);
+        let bloom_filter_offset = data.len();
+        Bloom::encode(&bloom, &mut data);
+        data.put_u32(bloom_filter_offset as u32);
+        // persistent
         let file = FileObject::create(path.as_ref(), data)?;
         SsTable::open(id, block_cache, file)
     }

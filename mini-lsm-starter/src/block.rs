@@ -5,7 +5,7 @@ pub use builder::BlockBuilder;
 use bytes::{Buf, BufMut, Bytes};
 pub use iterator::BlockIterator;
 
-use crate::key::KeyBytes;
+use crate::key::{KeyBytes, KeyVec};
 
 pub(crate) const U16_SIZE: usize = size_of::<u16>();
 
@@ -46,14 +46,20 @@ impl Block {
     }
 
     pub(crate) fn key_range(&self) -> (KeyBytes, KeyBytes) {
-        let get_key = |idx| {
+        let get_key = |idx: usize, first_key: KeyBytes| {
+            let mut key = KeyVec::new();
             if let Some(off) = self.offsets.get(idx) {
                 let mut key_begin = &self.data[*off as usize..];
-                let key_len = key_begin.get_u16() as usize;
-                return KeyBytes::from_bytes(Bytes::copy_from_slice(&key_begin[..key_len]));
+                let overlap_key_len = key_begin.get_u16() as usize;
+                let rest_key_len = key_begin.get_u16() as usize;
+                key.append(&(first_key.raw_ref()[..overlap_key_len]));
+                key.append(&(key_begin[..rest_key_len]));
             }
-            KeyBytes::from_bytes(Bytes::new())
+            return KeyBytes::from_bytes(Bytes::copy_from_slice(key.raw_ref()));
         };
-        (get_key(0), get_key(self.offsets.len() - 1))
+
+        let first_key = get_key(0, KeyBytes::from_bytes(Bytes::new()));
+        let last_key = get_key(self.offsets.len() - 1, first_key.clone());
+        (first_key, last_key)
     }
 }

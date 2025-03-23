@@ -33,11 +33,13 @@ impl BlockBuilder {
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
+        let overlap_len = self.key_overlap_len(key);
+        let rest_len = key.len() - overlap_len;
         // 编码后的长度必须小于等于block_size
         let target_size = self.data.len() /* kv */
-            + key.len() /* key */
+            + rest_len /* key */
             + value.len() /* value */
-            + size_of::<u16>() * 2 /* key_len + value_len */
+            + size_of::<u16>() * 3 /* overlap_key_len + rest_key_len + value_len */
             + self.offsets.len() * 2 /* offsets */
             + size_of::<u16>() /* new_offset */
             + size_of::<u16>(); /* num_entries */
@@ -48,8 +50,9 @@ impl BlockBuilder {
             self.first_key.append(key.raw_ref());
         }
         self.offsets.push(self.data.len() as u16);
-        self.data.put_u16(key.len() as u16);
-        self.data.extend(key.raw_ref());
+        self.data.put_u16(overlap_len as u16);
+        self.data.put_u16(rest_len as u16);
+        self.data.extend(&(key.raw_ref()[overlap_len..]));
         self.data.put_u16(value.len() as u16);
         self.data.extend(value);
         true
@@ -66,5 +69,15 @@ impl BlockBuilder {
             data: self.data,
             offsets: self.offsets,
         }
+    }
+
+    fn key_overlap_len(&self, key: KeySlice) -> usize {
+        self.first_key
+            .as_key_slice()
+            .raw_ref()
+            .iter()
+            .zip(key.raw_ref().iter())
+            .take_while(|(a, b)| a == b)
+            .count()
     }
 }

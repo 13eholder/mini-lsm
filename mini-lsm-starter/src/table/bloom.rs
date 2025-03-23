@@ -80,6 +80,14 @@ impl Bloom {
         filter.resize(nbytes, 0);
 
         // TODO: build the bloom filter
+        for key in keys {
+            let mut key = *key;
+            let delta = key.rotate_left(15);
+            for _ in 0..k {
+                key = key.wrapping_add(delta);
+                filter.set_bit(key as usize % nbits, true);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -97,7 +105,13 @@ impl Bloom {
             let delta = h.rotate_left(15);
 
             // TODO: probe the bloom filter
-
+            let mut key = h;
+            for _ in 0..self.k {
+                key = key.wrapping_add(delta);
+                if !self.filter.get_bit(key as usize % nbits) {
+                    return false;
+                }
+            }
             true
         }
     }
