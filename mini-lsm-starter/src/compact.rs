@@ -113,11 +113,6 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    // fn do_compcat(
-    //     &mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
-    // ) -> Result<Vec<Arc<SsTable>>> {
-    // }
-
     fn do_compact<I>(&self, iter: &mut I, flush_to_bottom: bool) -> Result<Vec<Arc<SsTable>>>
     where
         I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
@@ -271,6 +266,8 @@ impl LsmStorageInner {
             let output = sstables.iter().map(|s| s.sst_id()).collect::<Vec<_>>();
 
             let _state_lock = self.state_lock.lock();
+            // 必须重新获取snapshot,后台线程压缩期间不会阻塞 imm_memtables的创建以及memtable的更改
+            let snapshot = self.state.read().as_ref().clone();
             let (mut snapshot, files_to_remove) = self
                 .compaction_controller
                 .apply_compaction_result(&snapshot, &task, &output, false);

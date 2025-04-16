@@ -294,7 +294,7 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let state = self.state.read();
+        let state = self.state.read().clone();
         let mut v = state.memtable.get(key);
         if v.is_none() && !state.imm_memtables.is_empty() {
             v = state.imm_memtables.iter().find_map(|mt| mt.get(key));
@@ -361,17 +361,28 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
-            let _ = self.force_freeze_memtable(&self.state_lock.lock());
+        {
+            let state_lock = self.state_lock.lock();
+            let state = self.state.read();
+            if state.memtable.approximate_size() > self.options.target_sst_size {
+                drop(state);
+                self.force_freeze_memtable(&state_lock)?;
+            }
         }
         self.state.read().memtable.put(key, value)
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        if self.state.read().memtable.approximate_size() > self.options.target_sst_size {
-            let _ = self.force_freeze_memtable(&self.state_lock.lock());
+        {
+            let state_lock = self.state_lock.lock();
+            let state = self.state.read();
+            if state.memtable.approximate_size() > self.options.target_sst_size {
+                drop(state);
+                self.force_freeze_memtable(&state_lock)?;
+            }
         }
+
         self.state.read().memtable.put(key, Default::default())
     }
 
@@ -398,12 +409,16 @@ impl LsmStorageInner {
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let memtable = Arc::new(MemTable::create(self.next_sst_id()));
+
         let mut state = self.state.write();
         let mut snapshot = state.as_ref().clone();
         let old_memtable = std::mem::replace(&mut snapshot.memtable, memtable.clone());
-        old_memtable.sync_wal()?;
-        snapshot.imm_memtables.insert(0, old_memtable);
+        snapshot.imm_memtables.insert(0, old_memtable.clone());
         *state = Arc::new(snapshot);
+        drop(state);
+
+        old_memtable.sync_wal()?;
+
         Ok(())
     }
 
@@ -446,7 +461,7 @@ impl LsmStorageInner {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        let state = self.state.read();
+        let state = self.state.read().clone();
         let mut mtable_iters = Vec::with_capacity(state.imm_memtables.len() + 1);
         mtable_iters.push(Box::new(state.memtable.scan(lower, upper)));
         mtable_iters.extend(
@@ -488,7 +503,22 @@ impl LsmStorageInner {
                 .map(|sst_id| state.sstables[sst_id].clone())
                 .filter(|sst| key_overlap(lower, upper, sst.first_key(), sst.last_key()))
                 .collect::<Vec<Arc<SsTable>>>();
-            leveled_sst_iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
+
+            let iter = match lower {
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts)?,
+                Bound::Excluded(k) => {
+                    let mut iter =
+                        SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(k))?;
+                    if iter.is_valid() && iter.key().raw_ref() == k {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Included(k) => {
+                    SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(k))?
+                }
+            };
+            leveled_sst_iters.push(Box::new(iter));
         }
 
         let l0_merge_iter = MergeIterator::create(l0_iters);

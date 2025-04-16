@@ -55,16 +55,16 @@ impl SimpleLeveledCompactionController {
             if upper_num == 0 {
                 continue;
             }
-            if (lower_num / upper_num) * 100 < self.options.size_ratio_percent {
+            let size_ratio = lower_num as f64 / upper_num as f64;
+            if size_ratio < self.options.size_ratio_percent as f64 / 100.0 {
                 upper_level_idx = Some(idx);
                 lower_level_idx = Some(idx + 1);
                 break;
             }
         }
 
-        if lower_level_idx.is_none() {
-            return None;
-        }
+        // 解包,None则直接返回
+        lower_level_idx?;
 
         let upper_level = upper_level_idx.unwrap() + 1;
         let lower_level = lower_level_idx.unwrap() + 1;
@@ -90,10 +90,6 @@ impl SimpleLeveledCompactionController {
         task: &SimpleLeveledCompactionTask,
         output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        // println!(
-        //     "apply task {task:?} output {output:?} to state.levels {:?}",
-        //     snapshot.levels
-        // );
         let mut state = snapshot.clone();
         let mut files_to_remove = Vec::new();
 
@@ -108,13 +104,12 @@ impl SimpleLeveledCompactionController {
             state.levels[upper_level - 1].1.clear();
         }
         state.levels[task.lower_level - 1].1 = output.to_vec();
-        // println!("after apply new snapshoy.levels {:?}", state.levels);
         files_to_remove.extend(
             task.upper_level_sst_ids
                 .iter()
                 .chain(task.lower_level_sst_ids.iter()),
         );
 
-        return (state, files_to_remove);
+        (state, files_to_remove)
     }
 }
