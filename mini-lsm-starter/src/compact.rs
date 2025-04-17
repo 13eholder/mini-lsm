@@ -217,6 +217,20 @@ impl LsmStorageInner {
                     self.do_compact(&mut two_merge_iter, task.is_lower_level_bottom_level)
                 }
             }
+            CompactionTask::Tiered(task) => {
+                // 没有 l0_sstables
+                let snapshot = self.state.read().clone();
+                let mut iters = Vec::new();
+                for (_, sst_ids) in &task.tiers {
+                    let ssts = sst_ids
+                        .iter()
+                        .map(|sst_id| snapshot.sstables[sst_id].clone())
+                        .collect::<Vec<_>>();
+                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
+                }
+                let mut merge_iter = MergeIterator::create(iters);
+                self.do_compact(&mut merge_iter, task.bottom_tier_included)
+            }
             _ => unimplemented!(),
         }
     }

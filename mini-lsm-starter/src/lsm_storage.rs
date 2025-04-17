@@ -223,9 +223,13 @@ impl MiniLsm {
 
     /// Only call this in test cases due to race conditions
     pub fn force_flush(&self) -> Result<()> {
-        if !self.inner.state.read().memtable.is_empty() {
-            self.inner
-                .force_freeze_memtable(&self.inner.state_lock.lock())?;
+        {
+            let state_lock = self.inner.state_lock.lock();
+            let state = self.inner.state.read();
+            if !state.memtable.is_empty() {
+                drop(state);
+                self.inner.force_freeze_memtable(&state_lock)?;
+            }
         }
         if !self.inner.state.read().imm_memtables.is_empty() {
             self.inner.force_flush_next_imm_memtable()?;
@@ -442,7 +446,14 @@ impl LsmStorageInner {
             let mut state = self.state.write();
             let mut snapshot = state.as_ref().clone();
             snapshot.imm_memtables.pop();
-            snapshot.l0_sstables.insert(0, sst.sst_id());
+            if self.compaction_controller.flush_to_l0() {
+                snapshot.l0_sstables.insert(0, sst.sst_id());
+            } else {
+                // create a new tier
+                snapshot
+                    .levels
+                    .insert(0, (sst.sst_id(), vec![sst.sst_id()]));
+            }
             snapshot.sstables.insert(sst.sst_id(), sst.into());
             *state = Arc::new(snapshot);
         }
