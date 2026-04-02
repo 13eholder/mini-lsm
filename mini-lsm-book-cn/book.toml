@@ -1,0 +1,13 @@
+[book]
+authors = ["Alex Chi Z"]
+language = "zh-CN"
+src = "src"
+title = "一周学会 LSM"
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]
+
+[output.html]
+additional-css = ["custom.css"]
+git-repository-url = "https://github.com/skyzh/mini-lsm"
