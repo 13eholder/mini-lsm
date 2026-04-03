@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 
 use anyhow::Result;
 
@@ -56,10 +54,18 @@ pub struct MergeIterator<I: StorageIterator> {
     iters: BinaryHeap<HeapWrapper<I>>,
     current: Option<HeapWrapper<I>>,
 }
-
+// 由调用者维护iters顺序
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap = BinaryHeap::new();
+        for (i, iter) in iters.into_iter().filter(|iter| iter.is_valid()).enumerate() {
+            heap.push(HeapWrapper(i, iter));
+        }
+        let current = heap.pop();
+        Self {
+            iters: heap,
+            current,
+        }
     }
 }
 
@@ -69,18 +75,50 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
-
+    // 如果next报错,认为整个迭代器失效,处理完二叉堆逻辑问题后,立刻返回错误
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if let Some(mut current) = self.current.take() {
+            while let Some(mut other) = self.iters.peek_mut() {
+                if other.1.key() != current.1.key() {
+                    break;
+                }
+
+                match other.1.next() {
+                    Err(e) => {
+                        PeekMut::pop(other);
+                        return Err(e);
+                    }
+                    Ok(_) if !other.1.is_valid() => {
+                        PeekMut::pop(other);
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+
+            match current.1.next() {
+                Err(e) => return Err(e),
+                Ok(_) if current.1.is_valid() => {
+                    self.iters.push(current);
+                    self.current = self.iters.pop();
+                    return Ok(());
+                }
+                _ => {
+                    self.current = self.iters.pop();
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 }
