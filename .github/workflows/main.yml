@@ -25,12 +25,12 @@ jobs:
         with:
           tool: mdbook-toc
       - name: patch for gh-pages build
-        run: mv mini-lsm-book/theme/head.hbs._ mini-lsm-book/theme/head.hbs
+        run: mv mini-lsm-book-cn/theme/head.hbs._ mini-lsm-book-cn/theme/head.hbs
       - name: check and build
         run: cargo x ci
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: mini-lsm-book/book
+          path: mini-lsm-book-cn/book
 
   deploy:
     needs: build
@@ -41,7 +41,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-22.04
-    if: github.repository == 'skyzh/mini-lsm'
+    if: github.repository == '13eholder/mini-lsm'
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

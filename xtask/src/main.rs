@@ -106,13 +106,13 @@ fn clippy() -> Result<()> {
 
 fn build_book() -> Result<()> {
     println!("{}", style("mdbook build").bold());
-    cmd!("mdbook", "build").dir("mini-lsm-book").run()?;
+    cmd!("mdbook", "build").dir("mini-lsm-book-cn").run()?;
     Ok(())
 }
 
 fn serve_book() -> Result<()> {
     println!("{}", style("mdbook serve").bold());
-    cmd!("mdbook", "serve").dir("mini-lsm-book").run()?;
+    cmd!("mdbook", "serve").dir("mini-lsm-book-cn").run()?;
     Ok(())
 }
 
