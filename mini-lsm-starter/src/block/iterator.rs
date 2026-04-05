@@ -30,23 +30,19 @@ pub struct BlockIterator {
     value_range: (usize, usize),
     /// Current index of the key-value pair, should be in range of [0, num_of_elements)
     idx: usize,
-    /// The first key in the block
-    first_key: KeyVec,
+    //  The first key in the block
+    // first_key: KeyVec,
 }
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
-        let mut buf = &block.data[..];
-        let key_len = buf.get_u16() as usize;
-        let key = &buf[..key_len];
-        let first_key = KeyVec::from_vec(key.to_vec());
-
+        // let first_key = block.first_key();
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key,
+            // first_key,
         }
     }
 

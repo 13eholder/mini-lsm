@@ -41,6 +41,12 @@ impl BlockBuilder {
         }
     }
 
+    pub fn estimated_size(&self) -> usize {
+        self.data.len()
+            + self.offsets.len() * std::mem::size_of::<u16>()
+            + std::mem::size_of::<u16>() // for the number of entries
+    }
+
     /// Adds a key-value pair to the block. Returns false when the block is full.
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
@@ -54,12 +60,7 @@ impl BlockBuilder {
             return true;
         }
 
-        let total_size = self.data.len()
-            + self.offsets.len() * std::mem::size_of::<u16>()
-            + std::mem::size_of::<u16>() // num of entries
-            + target_size;
-
-        if total_size > self.block_size {
+        if self.estimated_size() + target_size > self.block_size {
             return false;
         }
 
