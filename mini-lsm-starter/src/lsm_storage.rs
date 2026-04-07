@@ -302,28 +302,21 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let state = self.state.read().clone();
-        let mut value = state.memtable.get(key);
+        let snapshot = self.state.read().clone();
 
-        if value.is_none() {
-            for imm_memtable in &state.imm_memtables {
-                if let Some(v) = imm_memtable.get(key) {
-                    value = Some(v);
-                    break;
-                }
-            }
+        if let Some(v) = snapshot
+            .memtable
+            .get(key)
+            .or_else(|| snapshot.imm_memtables.iter().find_map(|mt| mt.get(key)))
+        {
+            return Ok(if v.is_empty() { None } else { Some(v) });
         }
 
-        match value {
-            None => {}
-            Some(v) if v.is_empty() => return Ok(None),
-            Some(v) => return Ok(Some(v)),
-        }
-
-        let snapshot = state.clone();
-        drop(state);
-
-        for sst_id in &snapshot.l0_sstables {
+        for sst_id in snapshot
+            .l0_sstables
+            .iter()
+            .chain(snapshot.levels.iter().flat_map(|(_, ids)| ids.iter()))
+        {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
             if !key_overlap(
                 key,
@@ -334,42 +327,12 @@ impl LsmStorageInner {
             }
             let iter = SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
             if iter.is_valid() && iter.key().raw_ref() == key {
-                value = Some(Bytes::copy_from_slice(iter.value()));
-                break;
+                let v = Bytes::copy_from_slice(iter.value());
+                return Ok(if v.is_empty() { None } else { Some(v) });
             }
         }
 
-        if value.is_none() {
-            for (_, level_ssts) in &snapshot.levels {
-                for sst_id in level_ssts {
-                    let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
-                    if !key_overlap(
-                        key,
-                        sstable.first_key().as_key_slice(),
-                        sstable.last_key().as_key_slice(),
-                    ) {
-                        continue;
-                    }
-                    let iter = SsTableIterator::create_and_seek_to_key(
-                        sstable,
-                        KeySlice::from_slice(key),
-                    )?;
-                    if iter.is_valid() && iter.key().raw_ref() == key {
-                        value = Some(Bytes::copy_from_slice(iter.value()));
-                        break;
-                    }
-                }
-                if value.is_some() {
-                    break;
-                }
-            }
-        }
-
-        match value {
-            None => Ok(None),
-            Some(v) if v.is_empty() => Ok(None),
-            Some(v) => Ok(Some(v)),
-        }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -466,23 +429,29 @@ impl LsmStorageInner {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
+        let snapshot = self.state.read().clone();
         let mut mtable_iters = Vec::new();
-        let state = self.state.read();
         // mem table
-        let mtable_iter = state.memtable.scan(lower, upper);
+        let mtable_iter = snapshot.memtable.scan(lower, upper);
         mtable_iters.push(Box::new(mtable_iter));
         // imm memtable
-        for imm_mtable in &state.imm_memtables {
+        for imm_mtable in &snapshot.imm_memtables {
             mtable_iters.push(Box::new(imm_mtable.scan(lower, upper)));
         }
-
-        let snapshot = state.clone();
-        drop(state);
 
         // sstable iters
         let mut sstable_iters = Vec::new();
 
-        let create_sstable_iter = |sstable: Arc<SsTable>| -> Result<SsTableIterator> {
+        let create_sstable_iter = |sstable: Arc<SsTable>| -> Result<Option<SsTableIterator>> {
+            if !range_overlap(
+                lower,
+                upper,
+                sstable.first_key().as_key_slice(),
+                sstable.last_key().as_key_slice(),
+            ) {
+                return Ok(None);
+            }
+
             let iter = match lower {
                 Bound::Included(key) => {
                     SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?
@@ -499,34 +468,17 @@ impl LsmStorageInner {
                 }
                 Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
             };
-            Ok(iter)
+            Ok(Some(iter))
         };
 
-        for sst_id in &snapshot.l0_sstables {
+        for sst_id in snapshot
+            .l0_sstables
+            .iter()
+            .chain(snapshot.levels.iter().flat_map(|(_, ids)| ids.iter()))
+        {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
-            if !range_overlap(
-                lower,
-                upper,
-                sstable.first_key().as_key_slice(),
-                sstable.last_key().as_key_slice(),
-            ) {
-                continue;
-            }
-            sstable_iters.push(Box::new(create_sstable_iter(sstable)?));
-        }
-
-        for (_, level_ssts) in &snapshot.levels {
-            for sst_id in level_ssts {
-                let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
-                if !range_overlap(
-                    lower,
-                    upper,
-                    sstable.first_key().as_key_slice(),
-                    sstable.last_key().as_key_slice(),
-                ) {
-                    continue;
-                }
-                sstable_iters.push(Box::new(create_sstable_iter(sstable)?));
+            if let Some(iter) = create_sstable_iter(sstable)? {
+                sstable_iters.push(Box::new(iter));
             }
         }
 
