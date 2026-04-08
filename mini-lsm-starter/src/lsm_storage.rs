@@ -322,19 +322,27 @@ impl LsmStorageInner {
             return Ok(if v.is_empty() { None } else { Some(v) });
         }
 
+        let key_hash = farmhash::fingerprint32(key);
+
         for sst_id in snapshot
             .l0_sstables
             .iter()
             .chain(snapshot.levels.iter().flat_map(|(_, ids)| ids.iter()))
         {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
-            if !key_within(
+            let bloom_may_contain = sstable
+                .bloom
+                .as_ref()
+                .is_some_and(|bloom| bloom.may_contain(key_hash));
+            let key_within_range = key_within(
                 key,
                 sstable.first_key().as_key_slice(),
                 sstable.last_key().as_key_slice(),
-            ) {
+            );
+            if !bloom_may_contain || !key_within_range {
                 continue;
             }
+
             let iter = SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
             if iter.is_valid() && iter.key().raw_ref() == key {
                 let v = Bytes::copy_from_slice(iter.value());

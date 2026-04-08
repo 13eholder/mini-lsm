@@ -59,15 +59,18 @@ impl Block {
 
     pub fn first_key(&self) -> KeyVec {
         let mut buf = &self.data[..];
-        let key_len = buf.get_u16() as usize;
-        let key = &buf[..key_len];
+        let key_overlap_len = buf.get_u16() as usize;
+        assert!(key_overlap_len == 0);
+        let key_rest_len = buf.get_u16() as usize;
+        let key = &buf[..key_rest_len];
         KeyVec::from_vec(key.to_vec())
     }
 
-    pub fn last_key(&self) -> KeyVec {
+    pub fn last_key(&self, first_key: &[u8]) -> KeyVec {
         let mut buf = &self.data[*self.offsets.last().unwrap() as usize..];
-        let key_len = buf.get_u16() as usize;
-        let key = &buf[..key_len];
-        KeyVec::from_vec(key.to_vec())
+        let key_overlap_len = buf.get_u16() as usize;
+        let key_rest_len = buf.get_u16() as usize;
+        let key = &buf[..key_rest_len];
+        KeyVec::from_vec([&first_key[..key_overlap_len], key].concat())
     }
 }

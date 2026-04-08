@@ -51,12 +51,16 @@ impl BlockBuilder {
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        // key len + value len + offset + len of key + len of value
-        let target_size = std::mem::size_of::<u16>() * 3 + key.len() + value.len();
+        // key_overlap len + rest_key len + value len + offset + len of (rest key) + len of value
+        // an entry also need an offset (u16)
+        let key_overlap_len = self.key_overlap_len(key);
+        let rest_key_len = key.len() - key_overlap_len;
+        let target_size = std::mem::size_of::<u16>() * 4 + rest_key_len + value.len();
+        let rest_key = KeySlice::from_slice(&key.raw_ref()[key_overlap_len..]);
 
         if self.is_empty() {
             self.first_key = key.to_key_vec();
-            self._add(key, value);
+            self._add(key_overlap_len, key, value);
             return true;
         }
 
@@ -64,16 +68,26 @@ impl BlockBuilder {
             return false;
         }
 
-        self._add(key, value);
+        self._add(key_overlap_len, rest_key, value);
 
         true
     }
 
-    fn _add(&mut self, key: KeySlice, value: &[u8]) {
+    fn key_overlap_len(&self, key: KeySlice) -> usize {
+        self.first_key
+            .raw_ref()
+            .iter()
+            .zip(key.raw_ref())
+            .take_while(|(a, b)| a == b)
+            .count()
+    }
+
+    fn _add(&mut self, key_overlap_len: usize, rest_key: KeySlice, value: &[u8]) {
         self.offsets.push(self.data.len() as u16);
 
-        self.data.put_u16(key.len() as u16);
-        self.data.extend_from_slice(key.raw_ref());
+        self.data.put_u16(key_overlap_len as u16);
+        self.data.put_u16(rest_key.len() as u16);
+        self.data.extend_from_slice(rest_key.raw_ref());
         self.data.put_u16(value.len() as u16);
         self.data.extend_from_slice(value);
     }
