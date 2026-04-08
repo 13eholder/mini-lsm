@@ -32,6 +32,7 @@ use crate::compact::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::iterators::StorageIterator;
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
@@ -477,7 +478,7 @@ impl LsmStorageInner {
         }
 
         // sstable iters
-        let mut sstable_iters = Vec::new();
+        let mut l0_iters = Vec::new();
 
         let create_sstable_iter = |sstable: Arc<SsTable>| -> Result<Option<SsTableIterator>> {
             if !range_overlap(
@@ -515,14 +516,23 @@ impl LsmStorageInner {
         {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
             if let Some(iter) = create_sstable_iter(sstable)? {
-                sstable_iters.push(Box::new(iter));
+                l0_iters.push(Box::new(iter));
+            }
+        }
+
+        let mut low_level_ssts = Vec::new();
+        for (level, sst_ids) in &snapshot.levels {
+            for sst_id in sst_ids {
+                low_level_ssts.push(snapshot.sstables.get(sst_id).unwrap().clone());
             }
         }
 
         let mtable_iter = MergeIterator::create(mtable_iters);
-        let sstable_iter = MergeIterator::create(sstable_iters);
+        let sstable_iter = MergeIterator::create(l0_iters);
+        let low_level_iter = SstConcatIterator::create_and_seek_to_first(low_level_ssts)?;
         // lsm iter
-        let lsm_iter_inner = TwoMergeIterator::create(mtable_iter, sstable_iter)?;
+        let mtable_l0_iter = TwoMergeIterator::create(mtable_iter, sstable_iter)?;
+        let lsm_iter_inner = TwoMergeIterator::create(mtable_l0_iter, low_level_iter)?;
         let lsm_iter = LsmIterator::new(lsm_iter_inner, map_bound(upper))?;
         // fused iter
         let fused_iter = FusedIterator::new(lsm_iter);

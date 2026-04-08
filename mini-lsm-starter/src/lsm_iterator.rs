@@ -20,16 +20,18 @@ use nom::AsBytes;
 
 use crate::{
     iterators::{
-        StorageIterator, merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator,
+        StorageIterator, concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
+        two_merge_iterator::TwoMergeIterator,
     },
     key::KeySlice,
     mem_table::MemTableIterator,
     table::SsTableIterator,
 };
-
+type MtableIter = MergeIterator<MemTableIterator>;
+type L0SstIter = MergeIterator<SsTableIterator>;
+type SstIter = SstConcatIterator;
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-type LsmIteratorInner =
-    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
+type LsmIteratorInner = TwoMergeIterator<TwoMergeIterator<MtableIter, L0SstIter>, SstIter>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
