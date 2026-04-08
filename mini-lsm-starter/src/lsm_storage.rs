@@ -16,12 +16,13 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
+use std::fs::create_dir_all;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -38,7 +39,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -173,7 +174,14 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(()).ok();
+
+        let mut flush_thread = self.flush_thread.lock();
+        if let Some(flush_thread) = flush_thread.take() {
+            flush_thread.join().map_err(|e| anyhow!("{:?}", e))?;
+        }
+
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -262,6 +270,8 @@ impl LsmStorageInner {
         let path = path.as_ref();
         let state = LsmStorageState::create(&options);
 
+        create_dir_all(path)?;
+
         let compaction_controller = match &options.compaction_options {
             CompactionOptions::Leveled(options) => {
                 CompactionController::Leveled(LeveledCompactionController::new(options.clone()))
@@ -318,7 +328,7 @@ impl LsmStorageInner {
             .chain(snapshot.levels.iter().flat_map(|(_, ids)| ids.iter()))
         {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
-            if !key_overlap(
+            if !key_within(
                 key,
                 sstable.first_key().as_key_slice(),
                 sstable.last_key().as_key_slice(),
@@ -415,7 +425,26 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let imm_mtable = self.state.read().imm_memtables.last().cloned().unwrap();
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        imm_mtable.flush(&mut builder)?;
+        let sst_id = self.next_sst_id();
+        let sstable = builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?;
+
+        let state_lock = self.state_lock.lock();
+        {
+            let mut wguard = self.state.write();
+            let mut new_state = wguard.as_ref().clone();
+            new_state.sstables.insert(sst_id, Arc::new(sstable));
+            new_state.l0_sstables.insert(0, sst_id);
+            new_state.imm_memtables.pop();
+            *wguard = Arc::new(new_state);
+        }
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -493,7 +522,7 @@ impl LsmStorageInner {
     }
 }
 
-fn key_overlap(key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
+fn key_within(key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
     table_begin.raw_ref() <= key && key <= table_end.raw_ref()
 }
 

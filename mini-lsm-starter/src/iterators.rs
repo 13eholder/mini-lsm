@@ -35,6 +35,6 @@ pub trait StorageIterator {
 
     /// Number of underlying active iterators for this iterator.
     fn num_active_iterators(&self) -> usize {
-        1
+        if self.is_valid() { 1 } else { 0 }
     }
 }
