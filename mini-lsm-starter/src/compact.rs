@@ -252,8 +252,22 @@ impl LsmStorageInner {
                 }
             }
             CompactionTask::Tiered(task) => {
-                // Implementation for tiered compaction
-                unimplemented!()
+                let mut iters = Vec::with_capacity(task.tiers.len());
+                // 每一个Tier内部是有序的
+                for (_, tier_sst_ids) in &task.tiers {
+                    let mut ssts = Vec::with_capacity(tier_sst_ids.len());
+                    for id in tier_sst_ids.iter() {
+                        ssts.push(snapshot.sstables.get(id).unwrap().clone());
+                    }
+                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
+                }
+                // 多个Tier之间可能有重叠,使用MergeIterator
+                let mut merge_iter = MergeIterator::create(iters);
+                if compact_to_bottom_level {
+                    self.do_compact(&mut FusedIterator::new(merge_iter))
+                } else {
+                    self.do_compact(&mut merge_iter)
+                }
             }
         }
     }

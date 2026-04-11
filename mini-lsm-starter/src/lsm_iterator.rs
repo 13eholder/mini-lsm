@@ -29,7 +29,7 @@ use crate::{
 };
 type MtableIter = MergeIterator<MemTableIterator>;
 type L0SstIter = MergeIterator<SsTableIterator>;
-type SstIter = SstConcatIterator;
+type SstIter = MergeIterator<SstConcatIterator>;
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
 type LsmIteratorInner = TwoMergeIterator<TwoMergeIterator<MtableIter, L0SstIter>, SstIter>;
 

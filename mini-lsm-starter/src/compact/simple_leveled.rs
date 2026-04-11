@@ -105,12 +105,7 @@ impl SimpleLeveledCompactionController {
         let mut ssts_to_remove = Vec::new();
 
         if let Some(upper_level) = task.upper_level {
-            // 只有Flush线程会更改levels
-            assert_eq!(
-                task.upper_level_sst_ids,
-                new_snapshot.levels[upper_level - 1].1,
-                "sst mismatched"
-            );
+            // 只有Compaction线程会更改levels, Flush线程只会添加到L0
             ssts_to_remove.extend(&new_snapshot.levels[upper_level - 1].1);
             new_snapshot.levels[upper_level - 1].1.clear();
         } else {
