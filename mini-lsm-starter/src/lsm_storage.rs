@@ -509,30 +509,28 @@ impl LsmStorageInner {
             Ok(Some(iter))
         };
 
-        for sst_id in snapshot
-            .l0_sstables
-            .iter()
-            .chain(snapshot.levels.iter().flat_map(|(_, ids)| ids.iter()))
-        {
+        // L0 SSTs - key ranges may overlap, use MergeIterator
+        for sst_id in &snapshot.l0_sstables {
             let sstable = snapshot.sstables.get(sst_id).unwrap().clone();
             if let Some(iter) = create_sstable_iter(sstable)? {
                 l0_iters.push(Box::new(iter));
             }
         }
 
-        let mut low_level_ssts = Vec::new();
-        for (level, sst_ids) in &snapshot.levels {
+        // L1+ SSTs - key ranges don't overlap, use SstConcatIterator
+        let mut all_level_ssts = Vec::new();
+        for (_, sst_ids) in &snapshot.levels {
             for sst_id in sst_ids {
-                low_level_ssts.push(snapshot.sstables.get(sst_id).unwrap().clone());
+                all_level_ssts.push(snapshot.sstables.get(sst_id).unwrap().clone());
             }
         }
+        let level_iter = SstConcatIterator::create_and_seek_to_first(all_level_ssts)?;
 
         let mtable_iter = MergeIterator::create(mtable_iters);
         let sstable_iter = MergeIterator::create(l0_iters);
-        let low_level_iter = SstConcatIterator::create_and_seek_to_first(low_level_ssts)?;
         // lsm iter
         let mtable_l0_iter = TwoMergeIterator::create(mtable_iter, sstable_iter)?;
-        let lsm_iter_inner = TwoMergeIterator::create(mtable_l0_iter, low_level_iter)?;
+        let lsm_iter_inner = TwoMergeIterator::create(mtable_l0_iter, level_iter)?;
         let lsm_iter = LsmIterator::new(lsm_iter_inner, map_bound(upper))?;
         // fused iter
         let fused_iter = FusedIterator::new(lsm_iter);

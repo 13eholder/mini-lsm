@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
@@ -47,9 +49,43 @@ impl SimpleLeveledCompactionController {
     /// Returns `None` if no compaction needs to be scheduled. The order of SSTs in the compaction task id vector matters.
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            return Some(SimpleLeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids: snapshot.l0_sstables.clone(),
+                lower_level: 1,
+                lower_level_sst_ids: snapshot.levels.first().cloned().unwrap().1,
+                is_lower_level_bottom_level: self.options.max_levels == 1,
+            });
+        }
+
+        let mut level_sizes = Vec::new();
+        level_sizes.push(snapshot.l0_sstables.len());
+        for (_, sst_ids) in &snapshot.levels {
+            level_sizes.push(sst_ids.len());
+        }
+
+        for upper_level in 1..self.options.max_levels {
+            let lower_level = upper_level + 1;
+            let upper_level_size = level_sizes[upper_level];
+            let lower_level_size = level_sizes[lower_level];
+            if upper_level_size == 0 {
+                continue;
+            }
+            let size_ratio = lower_level_size as f64 / upper_level_size as f64;
+            if size_ratio < self.options.size_ratio_percent as f64 / 100.0 {
+                return Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(upper_level),
+                    upper_level_sst_ids: snapshot.levels.get(upper_level - 1).cloned().unwrap().1,
+                    lower_level,
+                    lower_level_sst_ids: snapshot.levels.get(lower_level - 1).cloned().unwrap().1,
+                    is_lower_level_bottom_level: lower_level == self.options.max_levels,
+                });
+            }
+        }
+        None
     }
 
     /// Apply the compaction result.
@@ -61,10 +97,41 @@ impl SimpleLeveledCompactionController {
     /// in your implementation.
     pub fn apply_compaction_result(
         &self,
-        _snapshot: &LsmStorageState,
-        _task: &SimpleLeveledCompactionTask,
-        _output: &[usize],
+        snapshot: &LsmStorageState,
+        task: &SimpleLeveledCompactionTask,
+        output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let mut new_snapshot = snapshot.clone();
+        let mut ssts_to_remove = Vec::new();
+
+        if let Some(upper_level) = task.upper_level {
+            // 只有Flush线程会更改levels
+            assert_eq!(
+                task.upper_level_sst_ids,
+                new_snapshot.levels[upper_level - 1].1,
+                "sst mismatched"
+            );
+            ssts_to_remove.extend(&new_snapshot.levels[upper_level - 1].1);
+            new_snapshot.levels[upper_level - 1].1.clear();
+        } else {
+            ssts_to_remove.extend(&task.upper_level_sst_ids);
+            let mut compacted_l0 = task
+                .upper_level_sst_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            new_snapshot.l0_sstables = new_snapshot
+                .l0_sstables
+                .iter()
+                .cloned()
+                .filter(|id| !compacted_l0.remove(id))
+                .collect();
+            assert!(compacted_l0.is_empty());
+        }
+
+        ssts_to_remove.extend(&new_snapshot.levels[task.lower_level - 1].1);
+        new_snapshot.levels[task.lower_level - 1].1 = output.to_vec();
+
+        (new_snapshot, ssts_to_remove)
     }
 }
