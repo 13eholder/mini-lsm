@@ -106,13 +106,13 @@ impl TieredCompactionController {
 
         let mut levels = Vec::new();
         let mut new_tier_added = false;
-        let mut files_to_remove = Vec::new();
+        let mut ssts_to_remove = Vec::new();
         //flush thread可能会刷新新的层级
-        for (tier_id, files) in &new_snapshot.levels {
-            if let Some(ffiles) = tier_to_remove.remove(tier_id) {
-                files_to_remove.extend(ffiles.iter().copied());
+        for (tier, ssts) in &new_snapshot.levels {
+            if let Some(ssts_removed) = tier_to_remove.remove(tier) {
+                ssts_to_remove.extend(ssts_removed.iter().copied());
             } else {
-                levels.push((*tier_id, files.clone()));
+                levels.push((*tier, ssts.clone()));
             }
 
             if tier_to_remove.is_empty() && !new_tier_added {
@@ -122,6 +122,6 @@ impl TieredCompactionController {
         }
 
         new_snapshot.levels = levels;
-        (new_snapshot, files_to_remove)
+        (new_snapshot, ssts_to_remove)
     }
 }
