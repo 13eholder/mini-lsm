@@ -354,7 +354,11 @@ impl LsmStorageInner {
         }
 
         for sst_id in ssts_to_remove {
-            std::fs::remove_file(self.path_of_sst(sst_id))?;
+            if let Err(e) = std::fs::remove_file(self.path_of_sst(sst_id))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(e.into());
+            }
         }
 
         Ok(())
@@ -393,7 +397,11 @@ impl LsmStorageInner {
         };
 
         for sst_id in ssts_to_remove {
-            std::fs::remove_file(self.path_of_sst(sst_id))?;
+            if let Err(e) = std::fs::remove_file(self.path_of_sst(sst_id))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(e.into());
+            }
         }
 
         Ok(())
@@ -434,7 +442,9 @@ impl LsmStorageInner {
 
     fn sync_flush(&self) -> Result<()> {
         if !self.options.enable_wal {
-            self.force_freeze_memtable(&self.state_lock.lock())?;
+            if !self.state.read().memtable.is_empty() {
+                self.force_freeze_memtable(&self.state_lock.lock())?;
+            }
             while !self.state.read().imm_memtables.is_empty() {
                 self.force_flush_next_imm_memtable()?;
             }
