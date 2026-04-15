@@ -16,7 +16,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
-use std::fs::create_dir_all;
+use std::fs::{File, create_dir_all};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -270,6 +270,7 @@ impl LsmStorageInner {
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
         let state = LsmStorageState::create(&options);
+        let state = Arc::new(RwLock::new(Arc::new(state)));
 
         create_dir_all(path)?;
 
@@ -286,18 +287,49 @@ impl LsmStorageInner {
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
+        let manifest_path = path.join("MANIFEST");
+        let manifest;
+        let mut next_sst_id = 1;
+
+        if !manifest_path.exists() {
+            manifest = Some(Manifest::create(&manifest_path)?);
+        } else {
+            let (old_manifest, records) = Manifest::recover(&manifest_path)?;
+            manifest = Some(old_manifest);
+            for record in records {
+                match record {
+                    ManifestRecord::NewMemtable(id) => {
+                        next_sst_id = id + 1;
+                    }
+                    ManifestRecord::Flush(id) => {
+                        // 暂时不知道要干嘛
+                    }
+                    ManifestRecord::Compaction(task, output) => {
+                        compaction_controller.apply_compaction_result(
+                            state.read().as_ref(),
+                            &task,
+                            &output,
+                            true,
+                        );
+                    }
+                }
+            }
+        }
+
         let storage = Self {
-            state: Arc::new(RwLock::new(Arc::new(state))),
+            state,
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
             block_cache: Arc::new(BlockCache::new(1024)),
-            next_sst_id: AtomicUsize::new(1),
+            next_sst_id: AtomicUsize::new(next_sst_id),
             compaction_controller,
-            manifest: None,
+            manifest: manifest,
             options: options.into(),
             mvcc: None,
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
+
+        storage.sync_dir()?;
 
         Ok(storage)
     }
@@ -414,12 +446,19 @@ impl LsmStorageInner {
     }
 
     pub(super) fn sync_dir(&self) -> Result<()> {
-        unimplemented!()
+        File::open(&self.path)?.sync_all()?;
+        Ok(())
     }
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let mtable = Arc::new(MemTable::create(self.next_sst_id()));
+        if let Some(manifest) = &self.manifest {
+            manifest.add_record(
+                _state_lock_observer,
+                ManifestRecord::NewMemtable(mtable.id()),
+            )?;
+        }
 
         {
             let mut wguard = self.state.write();
@@ -444,7 +483,13 @@ impl LsmStorageInner {
             self.path_of_sst(sst_id),
         )?;
 
+        self.sync_dir()?;
+
         let state_lock = self.state_lock.lock();
+        if let Some(manifest) = &self.manifest {
+            manifest.add_record(&state_lock, ManifestRecord::Flush(imm_mtable.id()))?;
+        }
+
         {
             let mut wguard = self.state.write();
             let mut new_state = wguard.as_ref().clone();

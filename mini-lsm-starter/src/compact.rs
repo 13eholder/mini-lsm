@@ -36,9 +36,10 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::FusedIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum CompactionTask {
     Leveled(LeveledCompactionTask),
     Tiered(TieredCompactionTask),
@@ -302,17 +303,28 @@ impl LsmStorageInner {
         drop(snapshot);
         let new_ssts = self.compact(&task)?;
 
-        let CompactionTask::ForceFullCompaction {
-            l0_sstables,
-            l1_sstables,
-        } = task
-        else {
-            panic!("unexpected compaction task type")
-        };
-
         let ssts_to_remove;
         {
             let _state_lock = self.state_lock.lock();
+            //
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    &_state_lock,
+                    ManifestRecord::Compaction(
+                        task.clone(),
+                        new_ssts.iter().map(|sst| sst.sst_id()).collect(),
+                    ),
+                )?;
+            }
+
+            let CompactionTask::ForceFullCompaction {
+                l0_sstables,
+                l1_sstables,
+            } = task
+            else {
+                panic!("unexpected compaction task type")
+            };
+
             let mut state = self.state.write();
             let mut snapshot = state.as_ref().clone();
 
@@ -361,6 +373,14 @@ impl LsmStorageInner {
         let output = new_ssts.iter().map(|sst| sst.sst_id()).collect::<Vec<_>>();
         let ssts_to_remove = {
             let _state_lock = self.state_lock.lock();
+
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    &_state_lock,
+                    ManifestRecord::Compaction(task.clone(), output.clone()),
+                )?;
+            }
+
             let mut snapshot = self.state.read().as_ref().clone();
             for sst in new_ssts {
                 snapshot.sstables.insert(sst.sst_id(), sst.clone());
@@ -412,6 +432,17 @@ impl LsmStorageInner {
         Ok(())
     }
 
+    fn sync_flush(&self) -> Result<()> {
+        if !self.options.enable_wal {
+            self.force_freeze_memtable(&self.state_lock.lock())?;
+            while !self.state.read().imm_memtables.is_empty() {
+                self.force_flush_next_imm_memtable()?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn spawn_flush_thread(
         self: &Arc<Self>,
         rx: crossbeam_channel::Receiver<()>,
@@ -424,7 +455,12 @@ impl LsmStorageInner {
                     recv(ticker) -> _ => if let Err(e) = this.trigger_flush() {
                         eprintln!("flush failed: {}", e);
                     },
-                    recv(rx) -> _ => return
+                    recv(rx) -> _ => if let Err(e) = this.sync_flush() {
+                        eprintln!("sync flush failed: {}", e);
+                        return;
+                    }else{
+                        return;
+                    }
                 }
             }
         });

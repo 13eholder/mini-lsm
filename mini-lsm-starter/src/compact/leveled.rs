@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LeveledCompactionTask {
     pub upper_level: Option<usize>,
     pub upper_level_sst_ids: Vec<usize>,
