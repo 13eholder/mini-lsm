@@ -449,7 +449,8 @@ impl LsmStorageInner {
                 self.force_flush_next_imm_memtable()?;
             }
         }
-
+        self.sync_dir()?;
+        self.sync()?;
         Ok(())
     }
 
