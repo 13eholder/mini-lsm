@@ -23,7 +23,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
@@ -48,13 +48,9 @@ impl BlockMeta {
     /// Encode block meta to a buffer.
     /// You may add extra fields to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.
-    pub fn encode_block_meta(
-        block_meta: &[BlockMeta],
-        #[allow(clippy::ptr_arg)] // remove this allow after you finish
-        buf: &mut Vec<u8>,
-    ) {
-        // Entrys + num of entry
-        // Entry: offset(u32) + first key len(u16) + first key + last key len(u16) + last key
+    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
+        let original_len = buf.len();
+        buf.put_u32(block_meta.len() as u32);
         for meta in block_meta {
             buf.put_u32(meta.offset as u32);
             buf.put_u16(meta.first_key.len() as u16);
@@ -62,27 +58,25 @@ impl BlockMeta {
             buf.put_u16(meta.last_key.len() as u16);
             buf.extend_from_slice(meta.last_key.raw_ref());
         }
-        buf.put_u16(block_meta.len() as u16);
+        buf.put_u32(crc32fast::hash(
+            &buf[original_len + std::mem::size_of::<u32>()..],
+        ));
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        let mut buf = buf;
-        let data = buf.copy_to_bytes(buf.remaining());
-
-        let num_of_entries_start = data.len() - std::mem::size_of::<u16>();
-        let num = (&data[num_of_entries_start..]).get_u16() as usize;
-
-        let mut block_meta_entries = &data[..num_of_entries_start];
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
+        let num = buf.get_u32() as usize;
         let mut block_meta = Vec::with_capacity(num);
+        let checksum = crc32fast::hash(&buf[..buf.remaining() - std::mem::size_of::<u32>()]);
+
         for _ in 0..num {
-            let offset = block_meta_entries.get_u32() as usize;
+            let offset = buf.get_u32() as usize;
 
-            let first_key_len = block_meta_entries.get_u16() as usize;
-            let first_key = KeyBytes::from_bytes(block_meta_entries.copy_to_bytes(first_key_len));
+            let first_key_len = buf.get_u16() as usize;
+            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
 
-            let last_key_len = block_meta_entries.get_u16() as usize;
-            let last_key = KeyBytes::from_bytes(block_meta_entries.copy_to_bytes(last_key_len));
+            let last_key_len = buf.get_u16() as usize;
+            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
 
             block_meta.push(BlockMeta {
                 offset,
@@ -91,7 +85,11 @@ impl BlockMeta {
             });
         }
 
-        block_meta
+        if buf.get_u32() != checksum {
+            bail!("meta checksum mismatched");
+        }
+
+        Ok(block_meta)
     }
 }
 
@@ -167,7 +165,7 @@ impl SsTable {
             block_meta_offset,
             bloom_offset - block_meta_offset - u32_size,
         )?;
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
 
         let first_key = block_meta.first().unwrap().first_key.clone();
         let last_key = block_meta.last().unwrap().last_key.clone();
@@ -217,7 +215,13 @@ impl SsTable {
             current_block_offset,
             next_block_offset - current_block_offset,
         )?;
-        Ok(Arc::new(Block::decode(&data)))
+        let block_len = data.len() - std::mem::size_of::<u32>();
+        let block_data = &data[..block_len];
+        let checksum = (&data[block_len..]).get_u32();
+        if checksum != crc32fast::hash(block_data) {
+            bail!("block checksum mismatched");
+        }
+        Ok(Arc::new(Block::decode(block_data)))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
@@ -225,7 +229,7 @@ impl SsTable {
         if let Some(ref cache) = self.block_cache {
             cache
                 .try_get_with((self.id, block_idx), || self.read_block(block_idx))
-                .map_err(|e| anyhow::anyhow!("{}", e))
+                .map_err(|e| anyhow!("{}", e))
         } else {
             self.read_block(block_idx)
         }

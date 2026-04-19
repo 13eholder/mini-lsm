@@ -62,7 +62,9 @@ impl SsTableBuilder {
             first_key,
             last_key,
         });
-        self.data.extend(block.encode());
+        let block_data = block.encode();
+        self.data.extend(&block_data);
+        self.data.put_u32(crc32fast::hash(&block_data));
     }
 
     /// Adds a key-value pair to SSTable.

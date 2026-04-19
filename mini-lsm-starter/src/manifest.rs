@@ -18,7 +18,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use bytes::{Buf, BufMut};
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -60,10 +61,20 @@ impl Manifest {
         file.read_to_end(&mut buf)
             .context("failed to read manifest")?;
 
-        let records = serde_json::Deserializer::from_slice(&buf)
-            .into_iter::<ManifestRecord>()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode manifest records")?;
+        let mut buf_ptr = buf.as_slice();
+        let mut records = Vec::new();
+        while buf_ptr.has_remaining() {
+            let len = buf_ptr.get_u64() as usize;
+            let payload = &buf_ptr[..len];
+            let record = serde_json::from_slice::<ManifestRecord>(payload)
+                .context("failed to decode manifest record")?;
+            buf_ptr.advance(len);
+            let checksum = buf_ptr.get_u32();
+            if checksum != crc32fast::hash(payload) {
+                bail!("manifest checksum mismatched");
+            }
+            records.push(record);
+        }
 
         Ok((
             Self {
@@ -83,7 +94,11 @@ impl Manifest {
 
     pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
         let mut file = self.file.lock();
-        let payload = serde_json::to_vec(&record).context("failed to encode manifest record")?;
+        let mut payload =
+            serde_json::to_vec(&record).context("failed to encode manifest record")?;
+        file.write_all(&(payload.len() as u64).to_be_bytes())
+            .context("failed to write manifest record length")?;
+        payload.put_u32(crc32fast::hash(&payload));
         file.write_all(&payload)
             .context("failed to write manifest record")?;
         file.sync_all().context("failed to sync manifest")?;

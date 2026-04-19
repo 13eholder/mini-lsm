@@ -13,11 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -49,10 +50,19 @@ impl Wal {
         let mut buf = &buf[..];
 
         while !buf.is_empty() {
+            let mut hasher = crc32fast::Hasher::new();
             let key_len = buf.get_u16();
+            hasher.write_u16(key_len);
             let key = buf.copy_to_bytes(key_len as usize);
+            hasher.write(&key);
             let value_len = buf.get_u16();
+            hasher.write_u16(value_len);
             let value = buf.copy_to_bytes(value_len as usize);
+            hasher.write(&value);
+            let checksum = buf.get_u32();
+            if checksum != hasher.finalize() {
+                bail!("checksum mismatch");
+            }
             skiplist.insert(key, value);
         }
 
@@ -64,12 +74,22 @@ impl Wal {
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut file = self.file.lock();
         let mut buf = Vec::with_capacity(
-            key.len() + value.len() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>(),
+            key.len()
+                + value.len()
+                + std::mem::size_of::<u16>()
+                + std::mem::size_of::<u16>()
+                + std::mem::size_of::<u32>(),
         );
+        let mut hasher = crc32fast::Hasher::new();
         buf.put_u16(key.len() as u16);
+        hasher.write_u16(key.len() as u16);
         buf.put_slice(key);
+        hasher.write(key);
         buf.put_u16(value.len() as u16);
+        hasher.write_u16(value.len() as u16);
         buf.put_slice(value);
+        hasher.write(value);
+        buf.put_u32(hasher.finalize());
         file.write_all(&buf)?;
         Ok(())
     }
