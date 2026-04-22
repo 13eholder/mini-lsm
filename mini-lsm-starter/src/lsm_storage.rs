@@ -380,6 +380,8 @@ impl LsmStorageInner {
         } else {
             state.memtable = Arc::new(MemTable::create(next_sst_id));
         }
+
+        File::open(path)?.sync_all()?;
         manifest.add_record_when_init(ManifestRecord::NewMemtable(next_sst_id))?;
         next_sst_id += 1;
 
@@ -515,7 +517,7 @@ impl LsmStorageInner {
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         if self.options.enable_wal {
-            self.sync()?;
+            self.sync()?; // 确保WAL落盘
         }
 
         let next_sst_id = self.next_sst_id();
@@ -528,11 +530,8 @@ impl LsmStorageInner {
             Arc::new(MemTable::create(next_sst_id))
         };
 
-        if let Some(manifest) = &self.manifest {
-            manifest.add_record(
-                _state_lock_observer,
-                ManifestRecord::NewMemtable(mtable.id()),
-            )?;
+        if self.options.enable_wal {
+            self.sync_dir()?;
         }
 
         {
@@ -541,6 +540,13 @@ impl LsmStorageInner {
             let old_mtable = std::mem::replace(&mut new_state.memtable, mtable);
             new_state.imm_memtables.insert(0, old_mtable);
             *wguard = Arc::new(new_state);
+
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    _state_lock_observer,
+                    ManifestRecord::NewMemtable(next_sst_id),
+                )?;
+            }
         }
 
         Ok(())
@@ -582,6 +588,7 @@ impl LsmStorageInner {
         if self.options.enable_wal {
             let wal_path = self.path_of_wal(imm_mtable.id());
             std::fs::remove_file(wal_path)?;
+            self.sync_dir()?;
         }
 
         Ok(())

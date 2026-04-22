@@ -302,24 +302,14 @@ impl LsmStorageInner {
         };
         drop(snapshot);
         let new_ssts = self.compact(&task)?;
+        let output = new_ssts.iter().map(|sst| sst.sst_id()).collect::<Vec<_>>();
 
         let ssts_to_remove;
         {
             let _state_lock = self.state_lock.lock();
-            //
-            if let Some(manifest) = &self.manifest {
-                manifest.add_record(
-                    &_state_lock,
-                    ManifestRecord::Compaction(
-                        task.clone(),
-                        new_ssts.iter().map(|sst| sst.sst_id()).collect(),
-                    ),
-                )?;
-            }
-
             let CompactionTask::ForceFullCompaction {
-                l0_sstables,
-                l1_sstables,
+                ref l0_sstables,
+                ref l1_sstables,
             } = task
             else {
                 panic!("unexpected compaction task type")
@@ -351,6 +341,15 @@ impl LsmStorageInner {
             snapshot.levels[0].1 = target_sst_ids;
 
             *state = Arc::new(snapshot);
+
+            self.sync_dir()?;
+
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    &_state_lock,
+                    ManifestRecord::Compaction(task.clone(), output),
+                )?;
+            }
         }
 
         for sst_id in ssts_to_remove {
@@ -360,6 +359,8 @@ impl LsmStorageInner {
                 return Err(e.into());
             }
         }
+
+        self.sync_dir()?;
 
         Ok(())
     }
@@ -378,13 +379,6 @@ impl LsmStorageInner {
         let ssts_to_remove = {
             let _state_lock = self.state_lock.lock();
 
-            if let Some(manifest) = &self.manifest {
-                manifest.add_record(
-                    &_state_lock,
-                    ManifestRecord::Compaction(task.clone(), output.clone()),
-                )?;
-            }
-
             let mut snapshot = self.state.read().as_ref().clone();
             for sst in new_ssts {
                 snapshot.sstables.insert(sst.sst_id(), sst.clone());
@@ -393,6 +387,16 @@ impl LsmStorageInner {
                 .compaction_controller
                 .apply_compaction_result(&snapshot, &task, &output, false);
             *self.state.write() = Arc::new(new_state);
+
+            self.sync_dir()?;
+
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    &_state_lock,
+                    ManifestRecord::Compaction(task.clone(), output.clone()),
+                )?;
+            }
+
             ssts_to_remove
         };
 
@@ -403,6 +407,8 @@ impl LsmStorageInner {
                 return Err(e.into());
             }
         }
+
+        self.sync_dir()?;
 
         Ok(())
     }
@@ -420,7 +426,7 @@ impl LsmStorageInner {
                 let ticker = crossbeam_channel::tick(Duration::from_millis(50));
                 loop {
                     crossbeam_channel::select! {
-                        recv(ticker) -> _ => if let Err(e) = this.trigger_compaction() {
+                        recv(ticker) -> _ => if let Err(ref e) = this.trigger_compaction() {
                             eprintln!("compaction failed: {}", e);
                         },
                         recv(rx) -> _ => return
@@ -466,10 +472,10 @@ impl LsmStorageInner {
                     recv(ticker) -> _ => if let Err(e) = this.trigger_flush() {
                         eprintln!("flush failed: {}", e);
                     },
-                    recv(rx) -> _ => if let Err(e) = this.sync_flush() {
-                        eprintln!("sync flush failed: {}", e);
-                        return;
-                    }else{
+                    recv(rx) -> _ => {
+                        if let Err(ref e) = this.sync_flush() {
+                            eprintln!("sync flush failed: {}", e);
+                        }
                         return;
                     }
                 }
