@@ -34,7 +34,6 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
-use crate::lsm_iterator::FusedIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -132,29 +131,28 @@ impl LsmStorageInner {
     fn do_compact<I>(
         &self,
         iter: &mut I,
-        compact_to_bottom_level: bool,
+        _compact_to_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>>
     where
         I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
     {
         let mut builder = None;
         let mut new_ssts = Vec::new();
+        let mut last_key: Vec<u8> = Vec::new();
 
         while iter.is_valid() {
             if builder.is_none() {
                 builder = Some(SsTableBuilder::new(self.options.block_size));
             }
             let builder_inner = builder.as_mut().unwrap();
-            if compact_to_bottom_level {
-                if !iter.value().is_empty() {
-                    builder_inner.add(iter.key(), iter.value());
-                }
-            } else {
-                builder_inner.add(iter.key(), iter.value());
-            }
+            builder_inner.add(iter.key(), iter.value());
+
+            let current_key = iter.key().key_ref().to_vec();
+            let same_key_as_last = current_key == last_key;
+            last_key = current_key;
             iter.next()?;
 
-            if builder_inner.estimated_size() >= self.options.target_sst_size {
+            if builder_inner.estimated_size() >= self.options.target_sst_size && !same_key_as_last {
                 let sst_id = self.next_sst_id();
                 let finished_builder = builder.take().unwrap();
                 let sst = finished_builder.build(
@@ -208,17 +206,10 @@ impl LsmStorageInner {
                         .push(Box::new(SsTableIterator::create_and_seek_to_first(l1_sst)?));
                 }
 
-                if compact_to_bottom_level {
-                    self.do_compact(
-                        &mut FusedIterator::new(MergeIterator::create(iters_to_merge)),
-                        compact_to_bottom_level,
-                    )
-                } else {
-                    self.do_compact(
-                        &mut MergeIterator::create(iters_to_merge),
-                        compact_to_bottom_level,
-                    )
-                }
+                self.do_compact(
+                    &mut MergeIterator::create(iters_to_merge),
+                    compact_to_bottom_level,
+                )
             }
 
             CompactionTask::Simple(SimpleLeveledCompactionTask {
@@ -255,11 +246,7 @@ impl LsmStorageInner {
                             SstConcatIterator::create_and_seek_to_first(upper_level_ssts)?;
                         let mut iter =
                             TwoMergeIterator::create(upper_level_iter, lower_level_iter)?;
-                        if compact_to_bottom_level {
-                            self.do_compact(&mut FusedIterator::new(iter), compact_to_bottom_level)
-                        } else {
-                            self.do_compact(&mut iter, compact_to_bottom_level)
-                        }
+                        self.do_compact(&mut iter, compact_to_bottom_level)
                     }
                     None => {
                         let mut l0_sst_iters = Vec::with_capacity(upper_level_ssts.len());
@@ -285,11 +272,7 @@ impl LsmStorageInner {
                     iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
                 }
                 let mut merge_iter = MergeIterator::create(iters);
-                if compact_to_bottom_level {
-                    self.do_compact(&mut FusedIterator::new(merge_iter), compact_to_bottom_level)
-                } else {
-                    self.do_compact(&mut merge_iter, compact_to_bottom_level)
-                }
+                self.do_compact(&mut merge_iter, compact_to_bottom_level)
             }
         }
     }

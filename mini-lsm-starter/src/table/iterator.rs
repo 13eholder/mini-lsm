@@ -98,7 +98,7 @@ impl StorageIterator for SsTableIterator {
 
     /// Return whether the current block iterator is valid or not.
     fn is_valid(&self) -> bool {
-        self.blk_idx < self.table.block_meta.len()
+        self.blk_iter.is_valid()
     }
 
     /// Move to the next `key` in the block.

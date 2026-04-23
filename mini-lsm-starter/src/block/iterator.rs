@@ -123,13 +123,15 @@ impl BlockIterator {
         let key_overlap_len = entry.get_u16() as usize;
         let key_rest_len = entry.get_u16() as usize;
         let mut key = Vec::new();
-        key.extend_from_slice(&self.first_key.raw_ref()[..key_overlap_len]);
+        key.extend_from_slice(&self.first_key.key_ref()[..key_overlap_len]);
         key.extend_from_slice(&entry[..key_rest_len]);
-        self.key = KeyVec::from_vec(key);
         entry.advance(key_rest_len);
+        let ts = entry.get_u64();
+        self.key = KeyVec::from_vec_with_ts(key, ts);
 
         let value_len = entry.get_u16() as usize;
-        let value_offset_begin = offset + SIZEOF_U16 * 3 + key_rest_len; // key_overlap_len + key_rest_len + value_len
+        let value_offset_begin =
+            offset + SIZEOF_U16 * 2 + key_rest_len + std::mem::size_of::<u64>() + SIZEOF_U16;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
     }

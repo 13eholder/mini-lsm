@@ -16,14 +16,12 @@ use std::ops::Bound;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use nom::AsBytes;
 
 use crate::{
     iterators::{
         StorageIterator, concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator,
     },
-    key::KeySlice,
     mem_table::MemTableIterator,
     table::SsTableIterator,
 };
@@ -36,34 +34,96 @@ type LsmIteratorInner = TwoMergeIterator<TwoMergeIterator<MtableIter, L0SstIter>
 pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
+    prev_key: Vec<u8>,
+    is_valid: bool,
 }
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
-        Ok(Self {
+        let mut iter = Self {
             inner: iter,
             end_bound,
-        })
+            prev_key: Vec::new(),
+            is_valid: false,
+        };
+        iter.move_to_valid()?;
+        Ok(iter)
+    }
+
+    fn move_to_valid(&mut self) -> Result<()> {
+        loop {
+            if !self.inner.is_valid() {
+                self.is_valid = false;
+                return Ok(());
+            }
+            match &self.end_bound {
+                Bound::Included(end) => {
+                    if self.inner.key().key_ref() > end.as_ref() {
+                        self.is_valid = false;
+                        return Ok(());
+                    }
+                }
+                Bound::Excluded(end) => {
+                    if self.inner.key().key_ref() >= end.as_ref() {
+                        self.is_valid = false;
+                        return Ok(());
+                    }
+                }
+                Bound::Unbounded => {}
+            }
+            // skip old versions of the same key
+            if !self.prev_key.is_empty() && self.inner.key().key_ref() == self.prev_key.as_slice() {
+                self.inner.next()?;
+                continue;
+            }
+            self.is_valid = true;
+            return Ok(());
+        }
     }
 }
 
-impl StorageIterator for LsmIterator {
+/// Same as LsmIterator but with a lower bound.
+pub struct LsmRangeIterator {
+    inner: LsmIterator,
+}
+
+impl LsmRangeIterator {
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        lower: Bound<Bytes>,
+        upper: Bound<Bytes>,
+    ) -> Result<Self> {
+        let mut lsm = LsmIterator::new(iter, upper)?;
+        // Skip keys below the lower bound
+        while lsm.is_valid() {
+            match &lower {
+                Bound::Included(key) => {
+                    if lsm.key() >= key.as_ref() {
+                        break;
+                    }
+                }
+                Bound::Excluded(key) => {
+                    if lsm.key() > key.as_ref() {
+                        break;
+                    }
+                }
+                Bound::Unbounded => break,
+            }
+            lsm.next()?;
+        }
+        Ok(Self { inner: lsm })
+    }
+}
+
+impl StorageIterator for LsmRangeIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        match &self.end_bound {
-            Bound::Included(end) => {
-                self.inner.is_valid() && self.inner.key() <= KeySlice::from_slice(end.as_bytes())
-            }
-            Bound::Excluded(end) => {
-                self.inner.is_valid() && self.inner.key() < KeySlice::from_slice(end.as_bytes())
-            }
-            Bound::Unbounded => self.inner.is_valid(),
-        }
+        self.inner.is_valid()
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key()
     }
 
     fn value(&self) -> &[u8] {
@@ -72,6 +132,33 @@ impl StorageIterator for LsmIterator {
 
     fn next(&mut self) -> Result<()> {
         self.inner.next()
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
+    }
+}
+
+impl StorageIterator for LsmIterator {
+    type KeyType<'a> = &'a [u8];
+
+    fn is_valid(&self) -> bool {
+        self.is_valid
+    }
+
+    fn key(&self) -> &[u8] {
+        self.inner.key().key_ref()
+    }
+
+    fn value(&self) -> &[u8] {
+        self.inner.value()
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.prev_key = self.inner.key().key_ref().to_vec();
+        self.inner.next()?;
+        self.move_to_valid()?;
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {

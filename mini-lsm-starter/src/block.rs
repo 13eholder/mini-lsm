@@ -63,7 +63,9 @@ impl Block {
         assert!(key_overlap_len == 0);
         let key_rest_len = buf.get_u16() as usize;
         let key = &buf[..key_rest_len];
-        KeyVec::from_vec(key.to_vec())
+        buf.advance(key_rest_len);
+        let ts = buf.get_u64();
+        KeyVec::from_vec_with_ts(key.to_vec(), ts)
     }
 
     pub fn last_key(&self, first_key: &[u8]) -> KeyVec {
@@ -71,6 +73,8 @@ impl Block {
         let key_overlap_len = buf.get_u16() as usize;
         let key_rest_len = buf.get_u16() as usize;
         let key = &buf[..key_rest_len];
-        KeyVec::from_vec([&first_key[..key_overlap_len], key].concat())
+        buf.advance(key_rest_len);
+        let ts = buf.get_u64();
+        KeyVec::from_vec_with_ts([&first_key[..key_overlap_len], key].concat(), ts)
     }
 }

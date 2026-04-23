@@ -1,4 +1,3 @@
-// REMOVE THIS LINE after fully implementing this functionality
 // Copyright (c) 2022-2025 Alex Chi Z
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +22,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -42,7 +41,7 @@ impl Wal {
         })
     }
 
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).append(true).open(path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
@@ -51,19 +50,21 @@ impl Wal {
 
         while !buf.is_empty() {
             let mut hasher = crc32fast::Hasher::new();
-            let key_len = buf.get_u16();
-            hasher.write_u16(key_len);
-            let key = buf.copy_to_bytes(key_len as usize);
+            let key_len = buf.get_u16() as usize;
+            hasher.write_u16(key_len as u16);
+            let key = buf.copy_to_bytes(key_len);
             hasher.write(&key);
-            let value_len = buf.get_u16();
-            hasher.write_u16(value_len);
-            let value = buf.copy_to_bytes(value_len as usize);
+            let ts = buf.get_u64();
+            hasher.write_u64(ts);
+            let value_len = buf.get_u16() as usize;
+            hasher.write_u16(value_len as u16);
+            let value = buf.copy_to_bytes(value_len);
             hasher.write(&value);
             let checksum = buf.get_u32();
             if checksum != hasher.finalize() {
                 bail!("checksum mismatch");
             }
-            skiplist.insert(key, value);
+            skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
         }
 
         Ok(Wal {
@@ -71,20 +72,23 @@ impl Wal {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         let mut file = self.file.lock();
         let mut buf = Vec::with_capacity(
-            key.len()
+            key.key_len()
                 + value.len()
                 + std::mem::size_of::<u16>()
+                + std::mem::size_of::<u64>()
                 + std::mem::size_of::<u16>()
                 + std::mem::size_of::<u32>(),
         );
         let mut hasher = crc32fast::Hasher::new();
-        buf.put_u16(key.len() as u16);
-        hasher.write_u16(key.len() as u16);
-        buf.put_slice(key);
-        hasher.write(key);
+        buf.put_u16(key.key_len() as u16);
+        hasher.write_u16(key.key_len() as u16);
+        buf.put_slice(key.key_ref());
+        hasher.write(key.key_ref());
+        buf.put_u64(key.ts());
+        hasher.write_u64(key.ts());
         buf.put_u16(value.len() as u16);
         hasher.write_u16(value.len() as u16);
         buf.put_slice(value);
@@ -94,7 +98,6 @@ impl Wal {
         Ok(())
     }
 
-    /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
     pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
         unimplemented!()
     }
