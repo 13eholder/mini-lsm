@@ -24,7 +24,7 @@ use crossbeam_skiplist::map::Entry;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
-use crate::key::{KeyBytes, KeySlice, TS_DEFAULT};
+use crate::key::{KeyBytes, KeySlice, TS_DEFAULT, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
@@ -52,6 +52,26 @@ pub(crate) fn map_key_bound(bound: Bound<KeySlice>) -> Bound<KeyBytes> {
         Bound::Excluded(x) => Bound::Excluded(x.to_key_vec().into_key_bytes()),
         Bound::Unbounded => Bound::Unbounded,
     }
+}
+
+/// Create range bounds over MVCC keys from user key bounds.
+pub(crate) fn map_key_bound_plus_ts<'a>(
+    lower: Bound<&'a [u8]>,
+    upper: Bound<&'a [u8]>,
+    read_ts: u64,
+) -> (Bound<KeySlice<'a>>, Bound<KeySlice<'a>>) {
+    (
+        match lower {
+            Bound::Included(key) => Bound::Included(KeySlice::from_slice(key, read_ts)),
+            Bound::Excluded(key) => Bound::Excluded(KeySlice::from_slice(key, TS_RANGE_END)),
+            Bound::Unbounded => Bound::Unbounded,
+        },
+        match upper {
+            Bound::Included(key) => Bound::Included(KeySlice::from_slice(key, TS_RANGE_END)),
+            Bound::Excluded(key) => Bound::Excluded(KeySlice::from_slice(key, TS_RANGE_BEGIN)),
+            Bound::Unbounded => Bound::Unbounded,
+        },
+    )
 }
 
 impl MemTable {
@@ -130,7 +150,7 @@ impl MemTable {
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
         self.map
             .get(&KeyBytes::from_bytes_with_ts(
-                Bytes::from_static(unsafe { std::mem::transmute(key) }),
+                Bytes::from_static(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(key) }),
                 TS_DEFAULT,
             ))
             .map(|entry| entry.value().clone())
@@ -195,6 +215,14 @@ impl MemTable {
     /// Only use this function when closing the database
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    pub fn max_ts(&self) -> u64 {
+        self.map
+            .iter()
+            .map(|entry| entry.key().ts())
+            .max()
+            .unwrap_or(0)
     }
 }
 

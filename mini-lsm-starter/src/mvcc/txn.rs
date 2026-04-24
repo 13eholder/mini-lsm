@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::{
     collections::HashSet,
     ops::Bound,
@@ -38,24 +35,24 @@ pub struct Transaction {
     pub(crate) inner: Arc<LsmStorageInner>,
     pub(crate) local_storage: Arc<SkipMap<Bytes, Bytes>>,
     pub(crate) committed: Arc<AtomicBool>,
-    /// Write set and read set
     pub(crate) key_hashes: Option<Mutex<(HashSet<u32>, HashSet<u32>)>>,
 }
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        let inner_iter = self.inner.scan_with_ts(lower, upper, self.read_ts)?;
+        TxnIterator::create(self.clone(), inner_iter)
+    }
+
+    pub fn put(&self, _key: &[u8], _value: &[u8]) {
         unimplemented!()
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) {
-        unimplemented!()
-    }
-
-    pub fn delete(&self, key: &[u8]) {
+    pub fn delete(&self, _key: &[u8]) {
         unimplemented!()
     }
 
@@ -65,7 +62,9 @@ impl Transaction {
 }
 
 impl Drop for Transaction {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.inner.mvcc().ts.lock().1.remove_reader(self.read_ts);
+    }
 }
 
 type SkipMapRangeIter<'a> =
@@ -73,33 +72,44 @@ type SkipMapRangeIter<'a> =
 
 #[self_referencing]
 pub struct TxnLocalIterator {
-    /// Stores a reference to the skipmap.
     map: Arc<SkipMap<Bytes, Bytes>>,
-    /// Stores a skipmap iterator that refers to the lifetime of `TxnLocalIterator` itself.
     #[borrows(map)]
     #[not_covariant]
     iter: SkipMapRangeIter<'this>,
-    /// Stores the current key-value pair.
     item: (Bytes, Bytes),
+}
+
+impl TxnLocalIterator {
+    fn entry_to_item(
+        entry: Option<crossbeam_skiplist::map::Entry<'_, Bytes, Bytes>>,
+    ) -> (Bytes, Bytes) {
+        entry
+            .map(|x| (x.key().clone(), x.value().clone()))
+            .unwrap_or_else(|| (Bytes::new(), Bytes::new()))
+    }
 }
 
 impl StorageIterator for TxnLocalIterator {
     type KeyType<'a> = &'a [u8];
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().1.as_ref()
     }
 
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().0.as_ref()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let entry = self.with_iter_mut(|iter| TxnLocalIterator::entry_to_item(iter.next()));
+        self.with_item_mut(|item| {
+            *item = entry;
+        });
+        Ok(())
     }
 }
 
@@ -109,11 +119,32 @@ pub struct TxnIterator {
 }
 
 impl TxnIterator {
-    pub fn create(
-        txn: Arc<Transaction>,
-        iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
-    ) -> Result<Self> {
-        unimplemented!()
+    pub fn create(txn: Arc<Transaction>, iter: FusedIterator<LsmIterator>) -> Result<Self> {
+        let mut local_iter = TxnLocalIteratorBuilder {
+            map: txn.local_storage.clone(),
+            iter_builder: |map| map.range((Bound::Unbounded, Bound::Unbounded)),
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+        let entry = local_iter.with_iter_mut(|iter| TxnLocalIterator::entry_to_item(iter.next()));
+        local_iter.with_item_mut(|item| {
+            *item = entry;
+        });
+
+        let merged = TwoMergeIterator::create(local_iter, iter)?;
+        let mut iter = Self {
+            _txn: txn,
+            iter: merged,
+        };
+        iter.skip_deletes()?;
+        Ok(iter)
+    }
+
+    fn skip_deletes(&mut self) -> Result<()> {
+        while self.iter.is_valid() && self.iter.value().is_empty() {
+            self.iter.next()?;
+        }
+        Ok(())
     }
 }
 
@@ -136,7 +167,9 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.iter.next()?;
+        self.skip_deletes()?;
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {

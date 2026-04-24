@@ -160,10 +160,17 @@ impl SsTable {
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let u32_size = std::mem::size_of::<u32>() as u64;
+        let u64_size = std::mem::size_of::<u64>() as u64;
         let file_size = file.size();
 
-        let bloom_offset = (&(file.read(file_size - u32_size, u32_size)?)[..]).get_u32() as u64;
-        let bloom = Bloom::decode(&file.read(bloom_offset, file_size - bloom_offset - u32_size)?)?;
+        let max_ts_raw = file.read(file_size - u64_size, u64_size)?;
+        let max_ts = (&max_ts_raw[..]).get_u64();
+
+        let bloom_offset =
+            (&(file.read(file_size - u64_size - u32_size, u32_size)?)[..]).get_u32() as u64;
+        let bloom = Bloom::decode(
+            &file.read(bloom_offset, file_size - bloom_offset - u64_size - u32_size)?,
+        )?;
 
         let raw_meta_offset = file.read(bloom_offset - u32_size, u32_size)?;
         let block_meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
@@ -185,7 +192,7 @@ impl SsTable {
             first_key,
             last_key,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts,
         })
     }
 

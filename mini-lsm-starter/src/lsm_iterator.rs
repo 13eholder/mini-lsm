@@ -28,7 +28,6 @@ use crate::{
 type MtableIter = MergeIterator<MemTableIterator>;
 type L0SstIter = MergeIterator<SsTableIterator>;
 type SstIter = MergeIterator<SstConcatIterator>;
-/// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
 type LsmIteratorInner = TwoMergeIterator<TwoMergeIterator<MtableIter, L0SstIter>, SstIter>;
 
 pub struct LsmIterator {
@@ -36,106 +35,92 @@ pub struct LsmIterator {
     end_bound: Bound<Bytes>,
     prev_key: Vec<u8>,
     is_valid: bool,
+    read_ts: u64,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        end_bound: Bound<Bytes>,
+        read_ts: u64,
+    ) -> Result<Self> {
         let mut iter = Self {
+            is_valid: iter.is_valid(),
             inner: iter,
             end_bound,
             prev_key: Vec::new(),
-            is_valid: false,
+            read_ts,
         };
         iter.move_to_valid()?;
         Ok(iter)
     }
 
+    fn next_inner(&mut self) -> Result<()> {
+        self.inner.next()?;
+        if !self.inner.is_valid() {
+            self.is_valid = false;
+            return Ok(());
+        }
+        match self.end_bound.as_ref() {
+            Bound::Unbounded => {}
+            Bound::Included(key) => self.is_valid = self.inner.key().key_ref() <= key.as_ref(),
+            Bound::Excluded(key) => self.is_valid = self.inner.key().key_ref() < key.as_ref(),
+        }
+        Ok(())
+    }
+
     fn move_to_valid(&mut self) -> Result<()> {
         loop {
+            match self.end_bound.as_ref() {
+                Bound::Unbounded => {}
+                Bound::Included(key)
+                    if self.inner.is_valid() && self.inner.key().key_ref() > key.as_ref() =>
+                {
+                    self.is_valid = false;
+                    return Ok(());
+                }
+                Bound::Excluded(key)
+                    if self.inner.is_valid() && self.inner.key().key_ref() >= key.as_ref() =>
+                {
+                    self.is_valid = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+            while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
+                self.next_inner()?;
+            }
+            if !self.is_valid {
+                return Ok(());
+            }
             if !self.inner.is_valid() {
                 self.is_valid = false;
                 return Ok(());
             }
-            match &self.end_bound {
-                Bound::Included(end) => {
-                    if self.inner.key().key_ref() > end.as_ref() {
-                        self.is_valid = false;
-                        return Ok(());
-                    }
-                }
-                Bound::Excluded(end) => {
-                    if self.inner.key().key_ref() >= end.as_ref() {
-                        self.is_valid = false;
-                        return Ok(());
-                    }
-                }
-                Bound::Unbounded => {}
+            self.prev_key.clear();
+            self.prev_key.extend(self.inner.key().key_ref());
+
+            while self.inner.is_valid()
+                && self.inner.key().key_ref() == self.prev_key
+                && self.inner.key().ts() > self.read_ts
+            {
+                self.next_inner()?;
             }
-            // skip old versions of the same key
-            if !self.prev_key.is_empty() && self.inner.key().key_ref() == self.prev_key.as_slice() {
-                self.inner.next()?;
+            if !self.is_valid {
+                return Ok(());
+            }
+            if !self.inner.is_valid() {
+                self.is_valid = false;
+                return Ok(());
+            }
+            if self.inner.key().key_ref() != self.prev_key {
                 continue;
             }
-            self.is_valid = true;
-            return Ok(());
-        }
-    }
-}
-
-/// Same as LsmIterator but with a lower bound.
-pub struct LsmRangeIterator {
-    inner: LsmIterator,
-}
-
-impl LsmRangeIterator {
-    pub(crate) fn new(
-        iter: LsmIteratorInner,
-        lower: Bound<Bytes>,
-        upper: Bound<Bytes>,
-    ) -> Result<Self> {
-        let mut lsm = LsmIterator::new(iter, upper)?;
-        // Skip keys below the lower bound
-        while lsm.is_valid() {
-            match &lower {
-                Bound::Included(key) => {
-                    if lsm.key() >= key.as_ref() {
-                        break;
-                    }
-                }
-                Bound::Excluded(key) => {
-                    if lsm.key() > key.as_ref() {
-                        break;
-                    }
-                }
-                Bound::Unbounded => break,
+            if !self.inner.value().is_empty() {
+                self.is_valid = true;
+                return Ok(());
             }
-            lsm.next()?;
         }
-        Ok(Self { inner: lsm })
-    }
-}
-
-impl StorageIterator for LsmRangeIterator {
-    type KeyType<'a> = &'a [u8];
-
-    fn is_valid(&self) -> bool {
-        self.inner.is_valid()
-    }
-
-    fn key(&self) -> &[u8] {
-        self.inner.key()
-    }
-
-    fn value(&self) -> &[u8] {
-        self.inner.value()
-    }
-
-    fn next(&mut self) -> Result<()> {
-        self.inner.next()
-    }
-
-    fn num_active_iterators(&self) -> usize {
-        self.inner.num_active_iterators()
     }
 }
 
@@ -155,8 +140,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.prev_key = self.inner.key().key_ref().to_vec();
-        self.inner.next()?;
+        self.next_inner()?;
         self.move_to_valid()?;
         Ok(())
     }
@@ -176,14 +160,10 @@ pub struct FusedIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> FusedIterator<I> {
     pub fn new(iter: I) -> Self {
-        let mut iter = Self {
+        Self {
             iter,
             has_errored: false,
-        };
-        if iter.is_valid() && iter.value().is_empty() {
-            let _ = iter.next();
         }
-        iter
     }
 }
 
