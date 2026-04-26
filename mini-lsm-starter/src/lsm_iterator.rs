@@ -55,72 +55,57 @@ impl LsmIterator {
         Ok(iter)
     }
 
+    fn update_validity(&mut self) {
+        self.is_valid = self.inner.is_valid()
+            && match self.end_bound.as_ref() {
+                Bound::Unbounded => true,
+                Bound::Included(key) => self.inner.key().key_ref() <= key.as_ref(),
+                Bound::Excluded(key) => self.inner.key().key_ref() < key.as_ref(),
+            };
+    }
+
     fn next_inner(&mut self) -> Result<()> {
         self.inner.next()?;
-        if !self.inner.is_valid() {
-            self.is_valid = false;
-            return Ok(());
-        }
-        match self.end_bound.as_ref() {
-            Bound::Unbounded => {}
-            Bound::Included(key) => self.is_valid = self.inner.key().key_ref() <= key.as_ref(),
-            Bound::Excluded(key) => self.is_valid = self.inner.key().key_ref() < key.as_ref(),
+        self.update_validity();
+        Ok(())
+    }
+
+    fn skip_older_versions(&mut self) -> Result<()> {
+        while self.is_valid && self.inner.key().key_ref() == self.prev_key {
+            self.next_inner()?;
         }
         Ok(())
     }
 
     fn move_to_valid(&mut self) -> Result<()> {
-        loop {
-            match self.end_bound.as_ref() {
-                Bound::Unbounded => {}
-                Bound::Included(key)
-                    if self.inner.is_valid() && self.inner.key().key_ref() > key.as_ref() =>
-                {
-                    self.is_valid = false;
-                    return Ok(());
-                }
-                Bound::Excluded(key)
-                    if self.inner.is_valid() && self.inner.key().key_ref() >= key.as_ref() =>
-                {
-                    self.is_valid = false;
-                    return Ok(());
-                }
-                _ => {}
-            }
-            while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
-                self.next_inner()?;
-            }
+        self.update_validity();
+        while self.is_valid {
+            self.skip_older_versions()?;
             if !self.is_valid {
-                return Ok(());
+                break;
             }
-            if !self.inner.is_valid() {
-                self.is_valid = false;
-                return Ok(());
-            }
+
             self.prev_key.clear();
             self.prev_key.extend(self.inner.key().key_ref());
 
-            while self.inner.is_valid()
+            while self.is_valid
                 && self.inner.key().key_ref() == self.prev_key
                 && self.inner.key().ts() > self.read_ts
             {
                 self.next_inner()?;
             }
             if !self.is_valid {
-                return Ok(());
-            }
-            if !self.inner.is_valid() {
-                self.is_valid = false;
-                return Ok(());
+                break;
             }
             if self.inner.key().key_ref() != self.prev_key {
                 continue;
             }
             if !self.inner.value().is_empty() {
-                self.is_valid = true;
                 return Ok(());
             }
         }
+        self.is_valid = false;
+        Ok(())
     }
 }
 

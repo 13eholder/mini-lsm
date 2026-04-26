@@ -410,6 +410,7 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage.
+    #[allow(dead_code)]
     pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
         let txn = self.mvcc().new_txn(self.clone(), false);
         txn.get(key)

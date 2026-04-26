@@ -131,30 +131,49 @@ impl LsmStorageInner {
     fn do_compact<I>(
         &self,
         iter: &mut I,
-        _compact_to_bottom_level: bool,
+        compact_to_bottom_level: bool,
+        watermark: u64,
     ) -> Result<Vec<Arc<SsTable>>>
     where
         I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
     {
-        let mut builder = None;
+        let mut builder = SsTableBuilder::new(self.options.block_size);
         let mut new_ssts = Vec::new();
         let mut last_key: Vec<u8> = Vec::new();
+        let mut retained_le_watermark = false; // 是否处理过第一个ts <= watermark的key
 
         while iter.is_valid() {
-            if builder.is_none() {
-                builder = Some(SsTableBuilder::new(self.options.block_size));
-            }
-            let builder_inner = builder.as_mut().unwrap();
-            builder_inner.add(iter.key(), iter.value());
-
             let current_key = iter.key().key_ref().to_vec();
-            let same_key_as_last = current_key == last_key;
-            last_key = current_key;
-            iter.next()?;
+            let is_new_key = current_key != last_key;
+            if is_new_key {
+                last_key = current_key;
+                retained_le_watermark = false;
+            }
 
-            if builder_inner.estimated_size() >= self.options.target_sst_size && !same_key_as_last {
+            let keep = if iter.key().ts() > watermark {
+                true
+            } else if retained_le_watermark {
+                false
+            } else {
+                retained_le_watermark = true;
+                !(compact_to_bottom_level && iter.value().is_empty())
+            };
+
+            if keep {
+                builder.add(iter.key(), iter.value());
+            }
+
+            iter.next()?;
+            // 将相同user key 的不同版本放在同一个sst中，避免出现某个key的不同版本分布在多个sst中导致的性能问题
+            let next_key_is_different =
+                !iter.is_valid() || iter.key().key_ref() != last_key.as_slice();
+            if !builder.is_empty()
+                && builder.estimated_size() >= self.options.target_sst_size
+                && next_key_is_different
+            {
                 let sst_id = self.next_sst_id();
-                let finished_builder = builder.take().unwrap();
+                let finished_builder =
+                    std::mem::replace(&mut builder, SsTableBuilder::new(self.options.block_size));
                 let sst = finished_builder.build(
                     sst_id,
                     Some(self.block_cache.clone()),
@@ -164,9 +183,9 @@ impl LsmStorageInner {
             }
         }
 
-        if let Some(b) = builder {
+        if !builder.is_empty() {
             let sst_id = self.next_sst_id();
-            let sst = b.build(
+            let sst = builder.build(
                 sst_id,
                 Some(self.block_cache.clone()),
                 self.path_of_sst(sst_id),
@@ -176,9 +195,19 @@ impl LsmStorageInner {
 
         Ok(new_ssts)
     }
+
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         let compact_to_bottom_level = task.compact_to_bottom_level();
         let snapshot = self.state.read().clone();
+
+        let watermark = {
+            let ts = self.mvcc().ts.lock();
+            if let Some(wm) = ts.1.watermark() {
+                wm
+            } else {
+                ts.0
+            }
+        };
 
         match task {
             CompactionTask::ForceFullCompaction {
@@ -209,6 +238,7 @@ impl LsmStorageInner {
                 self.do_compact(
                     &mut MergeIterator::create(iters_to_merge),
                     compact_to_bottom_level,
+                    watermark,
                 )
             }
 
@@ -246,7 +276,7 @@ impl LsmStorageInner {
                             SstConcatIterator::create_and_seek_to_first(upper_level_ssts)?;
                         let mut iter =
                             TwoMergeIterator::create(upper_level_iter, lower_level_iter)?;
-                        self.do_compact(&mut iter, compact_to_bottom_level)
+                        self.do_compact(&mut iter, compact_to_bottom_level, watermark)
                     }
                     None => {
                         let mut l0_sst_iters = Vec::with_capacity(upper_level_ssts.len());
@@ -258,6 +288,7 @@ impl LsmStorageInner {
                         self.do_compact(
                             &mut TwoMergeIterator::create(l0_sst_iter, lower_level_iter)?,
                             compact_to_bottom_level,
+                            watermark,
                         )
                     }
                 }
@@ -272,7 +303,7 @@ impl LsmStorageInner {
                     iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
                 }
                 let mut merge_iter = MergeIterator::create(iters);
-                self.do_compact(&mut merge_iter, compact_to_bottom_level)
+                self.do_compact(&mut merge_iter, compact_to_bottom_level, watermark)
             }
         }
     }

@@ -84,6 +84,10 @@ impl SsTableBuilder {
         self.data.len() + self.builder.estimated_size()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.meta.is_empty() && self.builder.is_empty()
+    }
+
     /// Builds the SSTable and writes it to the given path.
     pub fn build(
         mut self,

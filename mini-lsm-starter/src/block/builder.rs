@@ -42,9 +42,13 @@ impl BlockBuilder {
     }
 
     pub fn estimated_size(&self) -> usize {
-        self.data.len()
-            + self.offsets.len() * std::mem::size_of::<u16>()
-            + std::mem::size_of::<u16>() // for the number of entries
+        if !self.data.is_empty() {
+            self.data.len()
+                + self.offsets.len() * std::mem::size_of::<u16>()
+                + std::mem::size_of::<u16>() // for the number of entries
+        } else {
+            0
+        }
     }
 
     /// Adds a key-value pair to the block. Returns false when the block is full.
