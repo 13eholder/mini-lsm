@@ -158,22 +158,24 @@ impl MemTable {
 
     /// Put a key-value pair into the mem-table.
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        if let Some(ref wal) = self.wal {
-            wal.put(key, value)?;
-        }
-        self.approximate_size.fetch_add(
-            key.key_len() + value.len(),
-            std::sync::atomic::Ordering::AcqRel,
-        );
-        self.map.insert(
-            key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(value),
-        );
-        Ok(())
+        self.put_batch(&[(key, value)])
     }
 
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let mut estimated_size = 0;
+        for (key, value) in data {
+            estimated_size += key.raw_len() + value.len();
+            self.map.insert(
+                key.to_key_vec().into_key_bytes(),
+                Bytes::copy_from_slice(value),
+            );
+        }
+        self.approximate_size
+            .fetch_add(estimated_size, std::sync::atomic::Ordering::AcqRel);
+        if let Some(ref wal) = self.wal {
+            wal.put_batch(data)?;
+        }
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {

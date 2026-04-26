@@ -17,7 +17,6 @@ use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
-use std::hash::Hasher;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -49,22 +48,22 @@ impl Wal {
         let mut buf = &buf[..];
 
         while !buf.is_empty() {
-            let mut hasher = crc32fast::Hasher::new();
-            let key_len = buf.get_u16() as usize;
-            hasher.write_u16(key_len as u16);
-            let key = buf.copy_to_bytes(key_len);
-            hasher.write(&key);
-            let ts = buf.get_u64();
-            hasher.write_u64(ts);
-            let value_len = buf.get_u16() as usize;
-            hasher.write_u16(value_len as u16);
-            let value = buf.copy_to_bytes(value_len);
-            hasher.write(&value);
-            let checksum = buf.get_u32();
-            if checksum != hasher.finalize() {
+            let batch_size = buf.get_u32() as usize;
+            let mut batch_buf = &buf[..batch_size];
+            let checksum = crc32fast::hash(batch_buf);
+            let expected_checksum = (&buf[batch_size..]).get_u32();
+            if checksum != expected_checksum {
                 bail!("checksum mismatch");
             }
-            skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
+            while !batch_buf.is_empty() {
+                let key_len = batch_buf.get_u16() as usize;
+                let key = batch_buf.copy_to_bytes(key_len);
+                let ts = batch_buf.get_u64();
+                let value_len = batch_buf.get_u16() as usize;
+                let value = batch_buf.copy_to_bytes(value_len);
+                skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
+            }
+            buf.advance(batch_size + std::mem::size_of::<u32>());
         }
 
         Ok(Wal {
@@ -73,33 +72,23 @@ impl Wal {
     }
 
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        let mut file = self.file.lock();
-        let mut buf = Vec::with_capacity(
-            key.key_len()
-                + value.len()
-                + std::mem::size_of::<u16>()
-                + std::mem::size_of::<u64>()
-                + std::mem::size_of::<u16>()
-                + std::mem::size_of::<u32>(),
-        );
-        let mut hasher = crc32fast::Hasher::new();
-        buf.put_u16(key.key_len() as u16);
-        hasher.write_u16(key.key_len() as u16);
-        buf.put_slice(key.key_ref());
-        hasher.write(key.key_ref());
-        buf.put_u64(key.ts());
-        hasher.write_u64(key.ts());
-        buf.put_u16(value.len() as u16);
-        hasher.write_u16(value.len() as u16);
-        buf.put_slice(value);
-        hasher.write(value);
-        buf.put_u32(hasher.finalize());
-        file.write_all(&buf)?;
-        Ok(())
+        self.put_batch(&[(key, value)])
     }
 
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let mut file = self.file.lock();
+        let mut buf = Vec::new();
+        for (key, value) in data {
+            buf.put_u16(key.key_len() as u16);
+            buf.put_slice(key.key_ref());
+            buf.put_u64(key.ts());
+            buf.put_u16(value.len() as u16);
+            buf.put_slice(value);
+        }
+        file.write_all(&(buf.len() as u32).to_be_bytes())?;
+        file.write_all(&buf)?;
+        file.write_all(&crc32fast::hash(&buf).to_be_bytes())?;
+        Ok(())
     }
 
     pub fn sync(&self) -> Result<()> {
