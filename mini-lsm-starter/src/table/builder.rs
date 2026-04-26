@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::BufMut;
 
 use super::{BlockMeta, SsTable};
@@ -112,7 +112,11 @@ impl SsTableBuilder {
 
         data.put_u64(self.max_ts);
 
-        let file_obj = FileObject::create(path.as_ref(), data)?;
+        let file_obj = FileObject::create(path.as_ref(), data).context(format!(
+            "SsTableBuilder create sst file {} failed",
+            path.as_ref().display()
+        ))?;
+
         Ok(SsTable {
             file: file_obj,
             block_meta: self.meta,

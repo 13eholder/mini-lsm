@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -551,7 +551,9 @@ impl LsmStorageInner {
     }
 
     pub(super) fn sync_dir(&self) -> Result<()> {
-        File::open(&self.path)?.sync_all()?;
+        File::open(&self.path)?
+            .sync_all()
+            .context("LsmStorageInner sync dir path failed")?;
         Ok(())
     }
 
@@ -595,6 +597,7 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
+        // TODO(ZMY): week3_day2 test compaction_ingeration 前台手动触发flush会和后台线程触发flush冲突;是测试方式问题不是实现问题
         let imm_mtable = self.state.read().imm_memtables.last().cloned().unwrap();
         let mut builder = SsTableBuilder::new(self.options.block_size);
         imm_mtable.flush(&mut builder)?;
@@ -604,6 +607,7 @@ impl LsmStorageInner {
             Some(self.block_cache.clone()),
             self.path_of_sst(sst_id),
         )?;
+        drop(imm_mtable);
 
         self.sync_dir()?;
 
@@ -627,8 +631,12 @@ impl LsmStorageInner {
 
         // remove wal
         if self.options.enable_wal {
-            let wal_path = self.path_of_wal(imm_mtable.id());
-            std::fs::remove_file(wal_path)?;
+            let wal_path = self.path_of_wal(sst_id);
+            if let Err(e) = std::fs::remove_file(wal_path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(e.into());
+            }
             self.sync_dir()?;
         }
 
