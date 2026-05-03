@@ -156,6 +156,30 @@ impl MemTable {
             .map(|entry| entry.value().clone())
     }
 
+    /// Get the latest version visible at `read_ts` for `key` in this memtable.
+    /// Returns `Some(empty_bytes)` for a visible tombstone, and `None` if this memtable
+    /// does not contain any visible version for the key.
+    pub fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Option<Bytes> {
+        let lower = Bound::Included(KeyBytes::from_bytes_with_ts(
+            Bytes::copy_from_slice(key),
+            TS_RANGE_BEGIN,
+        ));
+        let upper = Bound::Included(KeyBytes::from_bytes_with_ts(
+            Bytes::copy_from_slice(key),
+            TS_RANGE_END,
+        ));
+
+        for entry in self.map.range((lower, upper)) {
+            if entry.key().key_ref() != key {
+                break;
+            }
+            if entry.key().ts() <= read_ts {
+                return Some(entry.value().clone());
+            }
+        }
+        None
+    }
+
     /// Put a key-value pair into the mem-table.
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
         self.put_batch(&[(key, value)])

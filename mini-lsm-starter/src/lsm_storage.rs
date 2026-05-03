@@ -32,7 +32,7 @@ use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
-use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
+use crate::key::{KeySlice, TS_RANGE_BEGIN};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_key_bound, map_key_bound_plus_ts};
@@ -418,16 +418,21 @@ impl LsmStorageInner {
 
     pub(crate) fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         let snapshot = self.state.read().clone();
-        let mut memtable_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
-        memtable_iters.push(Box::new(snapshot.memtable.scan(
-            map_key_bound(Bound::Included(KeySlice::from_slice(key, TS_RANGE_BEGIN))),
-            map_key_bound(Bound::Included(KeySlice::from_slice(key, TS_RANGE_END))),
-        )));
+        if let Some(value) = snapshot.memtable.get_with_ts(key, read_ts) {
+            return if value.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(value))
+            };
+        }
         for memtable in &snapshot.imm_memtables {
-            memtable_iters.push(Box::new(memtable.scan(
-                map_key_bound(Bound::Included(KeySlice::from_slice(key, TS_RANGE_BEGIN))),
-                map_key_bound(Bound::Included(KeySlice::from_slice(key, TS_RANGE_END))),
-            )));
+            if let Some(value) = memtable.get_with_ts(key, read_ts) {
+                return if value.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(value))
+                };
+            }
         }
 
         let keep_table = |key: &[u8], table: &SsTable| {
@@ -475,7 +480,7 @@ impl LsmStorageInner {
             level_iters.push(Box::new(level_iter));
         }
 
-        let memtable_iter = MergeIterator::create(memtable_iters);
+        let memtable_iter = MergeIterator::create(Vec::new());
         let iter = TwoMergeIterator::create(
             TwoMergeIterator::create(memtable_iter, l0_iter)?,
             MergeIterator::create(level_iters),

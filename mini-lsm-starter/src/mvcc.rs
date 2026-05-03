@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub mod txn;
 pub mod watermark;
 
@@ -39,7 +36,7 @@ pub(crate) struct CommittedTxnData {
 pub(crate) struct LsmMvccInner {
     pub(crate) write_lock: Mutex<()>,
     pub(crate) commit_lock: Mutex<()>,
-    pub(crate) ts: Arc<Mutex<(u64, Watermark)>>,
+    pub(crate) ts: Arc<Mutex<(u64, Watermark)>>, // (commit_ts,read_ts_reference)
     pub(crate) committed_txns: Arc<Mutex<BTreeMap<u64, CommittedTxnData>>>,
 }
 

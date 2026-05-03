@@ -40,7 +40,7 @@ pub struct Transaction {
     pub(crate) inner: Arc<LsmStorageInner>,
     pub(crate) local_storage: Arc<SkipMap<Bytes, Bytes>>,
     pub(crate) committed: Arc<AtomicBool>,
-    pub(crate) key_hashes: Option<Mutex<(HashSet<u32>, HashSet<u32>)>>,
+    pub(crate) key_hashes: Option<Mutex<(HashSet<u32>, HashSet<u32>)>>, // update模式需要开启
 }
 
 impl Transaction {
@@ -101,15 +101,19 @@ impl Transaction {
 
         let _commit_lock = self.inner.mvcc().commit_lock.lock();
         let serializable = self.key_hashes.is_some();
-        if let Some(key_hashes) = &self.key_hashes {
-            let key_hashes = key_hashes.lock();
-            let (write_set, read_set) = &*key_hashes;
-            if !write_set.is_empty() {
-                let committed_txns = self.inner.mvcc().committed_txns.lock();
-                for (_, txn_data) in committed_txns.range((self.read_ts + 1)..) {
-                    for key_hash in read_set {
-                        if txn_data.key_hashes.contains(key_hash) {
-                            bail!("serializable check failed");
+
+        if serializable {
+            // 如果是Update Txn并且进行了更改,需要检测读请求是否与read_ts之后提交的事务冲突
+            if let Some(key_hashes) = &self.key_hashes {
+                let key_hashes = key_hashes.lock();
+                let (write_set, read_set) = &*key_hashes;
+                if !write_set.is_empty() {
+                    let committed_txns = self.inner.mvcc().committed_txns.lock();
+                    for (_, txn_data) in committed_txns.range((self.read_ts + 1)..) {
+                        for key_hash in read_set {
+                            if txn_data.key_hashes.contains(key_hash) {
+                                bail!("serializable check failed");
+                            }
                         }
                     }
                 }
